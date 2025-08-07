@@ -20,7 +20,7 @@ endif
 .PHONY: build clean install test
 
 build:
-	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build ./cmd/mautrix-emaildawg
+	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o mautrix-emaildawg ./cmd/mautrix-emaildawg
 
 clean:
 	rm -f mautrix-emaildawg
