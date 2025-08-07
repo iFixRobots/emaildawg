@@ -169,6 +169,7 @@ func (c *Client) Connect() error {
 	}
 
 	if err != nil {
+		c.log.Error().Err(err).Str("address", addr).Msg("Failed to establish network connection to IMAP server")
 		return fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
 
@@ -179,6 +180,7 @@ func (c *Client) Connect() error {
 
 	// Authenticate
 	if err := c.client.Login(c.Username, c.Password).Wait(); err != nil {
+		c.log.Error().Err(err).Str("username", c.Username).Msg("IMAP authentication failed")
 		conn.Close()
 		return fmt.Errorf("IMAP login failed: %w", err)
 	}

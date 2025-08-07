@@ -67,14 +67,35 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	}
 	login.Client = emailClient
 	
-	// Extract login metadata
-	loginMetadata := login.Metadata.(*EmailLoginMetadata)
-	if loginMetadata.Email == "" {
+	// Extract login metadata with proper error handling
+	var email, username string
+	if login.Metadata != nil {
+		if loginMetadata, ok := login.Metadata.(*EmailLoginMetadata); ok && loginMetadata.Email != "" {
+			email = loginMetadata.Email
+			username = loginMetadata.Username
+			ec.Bridge.Log.Debug().Str("email", email).Msg("Loaded credentials from login metadata")
+		}
+	}
+
+	// If metadata is missing or invalid, try to extract email from login ID
+	if email == "" {
+		// Login ID format should be "email:user@domain.com"
+		loginIDStr := string(login.ID)
+		if len(loginIDStr) > 6 && loginIDStr[:6] == "email:" {
+			email = loginIDStr[6:]
+			username = email // Use email as username by default
+			ec.Bridge.Log.Debug().Str("email", email).Msg("Extracted email from login ID")
+		}
+	}
+
+	// If we still don't have an email, this login is invalid
+	if email == "" {
+		ec.Bridge.Log.Warn().Str("login_id", string(login.ID)).Msg("No email found in login metadata or ID")
 		return nil
 	}
-	
-	emailClient.Email = loginMetadata.Email
-	emailClient.Username = loginMetadata.Username
+
+	emailClient.Email = email
+	emailClient.Username = username
 	
 	// Load account credentials from database
 	account, err := ec.DB.GetAccount(ctx, login.UserMXID.String(), emailClient.Email)
@@ -188,6 +209,15 @@ func (ec *EmailClient) LogoutRemote(ctx context.Context) {
 	// Clear credentials
 	ec.Password = ""
 	ec.IMAPClient = nil
+	
+	// CRITICAL: Delete the UserLogin record from bridgev2 database
+	// This is what actually removes the login from the bridge framework
+	logoutState := status.BridgeState{
+		StateEvent: status.StateLoggedOut,
+		Source:     "bridge",
+	}
+	ec.UserLogin.Delete(ctx, logoutState, bridgev2.DeleteOpts{})
+	ec.UserLogin.Log.Debug().Msg("Successfully deleted UserLogin from bridge database")
 	
 	ec.UserLogin.Log.Info().Msg("Successfully logged out from email account")
 }
