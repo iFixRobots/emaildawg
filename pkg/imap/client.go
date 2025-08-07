@@ -156,7 +156,7 @@ func (c *Client) Connect() error {
 	c.log.Info().Str("host", c.Host).Int("port", c.Port).Bool("tls", c.TLS).Msg("Connecting to IMAP server")
 
 	// Create network connection
-	addr := fmt.Sprintf("%s:%d", c.Host, c.Port)
+	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	var conn net.Conn
 	var err error
 

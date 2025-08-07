@@ -68,7 +68,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Initialize managers
 	logger := bridge.Log.With().Str("component", "imap").Logger()
-	ec.IMAPManager = imap.NewManager(*bridge, &logger)
+	ec.IMAPManager = imap.NewManager(bridge, &logger)
 	
 	roomLogger := bridge.Log.With().Str("component", "matrix").Logger()
 	ec.RoomManager = matrix.NewRoomManager(&roomLogger)

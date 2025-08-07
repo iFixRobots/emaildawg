@@ -22,9 +22,9 @@ type Manager struct {
 }
 
 // NewManager creates a new IMAP manager
-func NewManager(bridge bridgev2.Bridge, log *zerolog.Logger) *Manager {
+func NewManager(bridge *bridgev2.Bridge, log *zerolog.Logger) *Manager {
 	return &Manager{
-		bridge:  bridge,
+		bridge:   *bridge,
 		log:     log,
 		clients: make(map[string]*Client),
 	}
