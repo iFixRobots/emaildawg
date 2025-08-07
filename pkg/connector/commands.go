@@ -38,8 +38,8 @@ var (
 		Name: "login",
 		Help: commands.HelpMeta{
 			Section:     HelpSectionAuth,
-			Description: "Connect to an email account",
-			Args:        "<email> <password>",
+			Description: "Connect to an email account using interactive login",
+			Args:        "",
 		},
 	}
 
