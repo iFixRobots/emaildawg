@@ -124,7 +124,14 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 		return nil, fmt.Errorf("%s", errorMsg)
 	}
 
+	// Save credentials to database FIRST (before creating user login)
+	// This ensures LoadUserLogin can find the account when it's called
+	if err := elp.saveAccount(ctx); err != nil {
+		return nil, fmt.Errorf("failed to save account: %w", err)
+	}
+
 	// Create new user login using the bridgev2 pattern
+	// This will trigger LoadUserLogin which needs the account to exist in DB
 	userLoginID := networkid.UserLoginID(fmt.Sprintf("email:%s", elp.email))
 	userLogin, err := elp.user.NewLogin(ctx, &database.UserLogin{
 		ID:         userLoginID,
@@ -138,11 +145,6 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user login: %w", err)
-	}
-
-	// Save credentials to database
-	if err := elp.saveAccount(ctx); err != nil {
-		return nil, fmt.Errorf("failed to save account: %w", err)
 	}
 
 	// The IMAP monitoring will be started when the client connects
