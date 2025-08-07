@@ -17,6 +17,25 @@ import (
 	"go.mau.fi/mautrix-emaildawg/pkg/email"
 )
 
+// IMAPDebugWriter captures all IMAP protocol traffic for debugging
+type IMAPDebugWriter struct {
+	logger *zerolog.Logger
+}
+
+// Write implements io.Writer to log IMAP protocol messages
+func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
+	data := string(p)
+	
+	// Don't log credentials but log everything else
+	if strings.Contains(strings.ToUpper(data), "LOGIN") {
+		w.logger.Debug().Str("imap_data", "[LOGIN COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
+	} else {
+		w.logger.Debug().Str("imap_data", strings.TrimSpace(data)).Msg("[IMAP PROTOCOL] Data exchange")
+	}
+	
+	return len(p), nil
+}
+
 // Client represents an IMAP connection for a specific email account
 type Client struct {
 	// Connection details
@@ -53,6 +72,13 @@ type Client struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	isShutdown bool
+	
+	// Connection state tracking to prevent multiple connections
+	connectingMu sync.Mutex
+	isConnecting bool
+
+	// Per-portal locks to serialize room creation
+	portalLocks sync.Map // map[string]*sync.Mutex
 }
 
 // EmailProvider represents common email provider configurations
@@ -146,6 +172,16 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 
 // Connect establishes connection to the IMAP server
 func (c *Client) Connect() error {
+	// Prevent concurrent connection attempts
+	c.connectingMu.Lock()
+	defer c.connectingMu.Unlock()
+	
+	if c.isConnecting {
+		return fmt.Errorf("connection already in progress")
+	}
+	c.isConnecting = true
+	defer func() { c.isConnecting = false }()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -177,9 +213,10 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
 
-	// Create IMAP client
+	// Create IMAP client with debug logging enabled
+	debugWriter := &IMAPDebugWriter{logger: c.log}
 	c.client = imapclient.New(conn, &imapclient.Options{
-		DebugWriter: nil, // Debug logging disabled for production
+		DebugWriter: debugWriter, // Enable full IMAP protocol debugging
 	})
 
 	// Authenticate
@@ -356,37 +393,41 @@ func (c *Client) runIDLE() error {
 		return fmt.Errorf("failed to start IDLE: %w", err)
 	}
 
-	// Wait for updates or timeout
-	idleDone := make(chan error, 1)
-	go func() {
-		// IDLE for up to 29 minutes (most servers timeout at 30)
-		time.Sleep(29 * time.Minute)
-		idleDone <- idleCmd.Close()
-	}()
+	c.log.Info().Msg("IDLE session started - waiting for email notifications")
 
-	// Monitor for updates - simplified version for now
+	// The real issue: idleCmd.Wait() hangs instead of returning on server notifications
+	// Solution: Use a timeout-based approach that periodically checks for new messages
+	// This gives us responsiveness while still using IDLE properly
+	
+	timeoutTimer := time.NewTimer(30 * time.Second) // Check every 30 seconds
+	defer timeoutTimer.Stop()
+
 	for {
 		select {
 		case <-c.stopIdle:
+			c.log.Debug().Msg("IDLE stop signal received")
 			idleCmd.Close()
 			return nil
 			
-		case err := <-idleDone:
-			if err != nil {
-				return fmt.Errorf("IDLE session ended with error: %w", err)
-			}
-			// IDLE ended normally (timeout), check for new messages
+		case <-timeoutTimer.C:
+			c.log.Debug().Msg("IDLE timeout reached, checking for messages and restarting")
+			// Close current IDLE session
+			idleCmd.Close()
+			
+			// Check for new messages
 			if err := c.checkNewMessages(); err != nil {
-				c.log.Error().Err(err).Msg("Error checking new messages")
+				c.log.Error().Err(err).Msg("Error checking new messages on IDLE timeout")
 			}
-			return nil
+			
+			// Restart IDLE for next cycle
+			return nil // This will cause idleLoop to restart IDLE
 		}
 	}
 }
 
 // checkNewMessages fetches and processes new messages
 func (c *Client) checkNewMessages() error {
-	c.log.Info().Msg("Starting manual sync - checking for new messages")
+	c.log.Info().Msg("[SYNC] Starting manual sync - checking for new messages")
 	
 	// Get current lastUID safely
 	c.mu.RLock()
@@ -409,6 +450,7 @@ func (c *Client) checkNewMessages() error {
 	if currentLastUID == 0 {
 		c.log.Info().Msg("First sync detected (lastUID=0), setting up to only sync NEW messages going forward")
 		// Get the current highest UID to mark as our starting point
+		c.log.Debug().Msg("[IMAP] Executing STATUS INBOX command to get UIDNext")
 		statusCmd := c.client.Status("INBOX", &imap.StatusOptions{
 			UIDNext: true,
 		})
@@ -417,6 +459,8 @@ func (c *Client) checkNewMessages() error {
 			c.log.Error().Err(err).Msg("Failed to get INBOX status")
 			return fmt.Errorf("failed to get INBOX status: %w", err)
 		}
+		
+		c.log.Info().Uint32("uidnext", uint32(statusData.UIDNext)).Msg("[IMAP] STATUS command completed - INBOX info")
 		
 		// Set lastUID to current highest UID so we only sync NEW messages from now on
 		currentHighestUID := statusData.UIDNext - 1
@@ -438,32 +482,34 @@ func (c *Client) checkNewMessages() error {
 	c.log.Debug().Msg("Waiting for IMAP search results")
 	
 	// Create a timeout channel for the search operation
-	searchDone := make(chan error, 1)
+	searchDone := make(chan struct{
+		result *imap.SearchData
+		err    error
+	}, 1)
+	
 	go func() {
-		_, err := searchCmd.Wait()
-		searchDone <- err
+		result, err := searchCmd.Wait()
+		searchDone <- struct {
+			result *imap.SearchData
+			err    error
+		}{result: result, err: err}
 	}()
 	
 	// Wait with timeout
+	var searchResult *imap.SearchData
 	select {
-	case err := <-searchDone:
-		if err != nil {
-			c.log.Error().Err(err).Msg("Failed to search for new messages")
-			return fmt.Errorf("failed to search for new messages: %w", err)
+	case response := <-searchDone:
+		if response.err != nil {
+			c.log.Error().Err(response.err).Msg("Failed to search for new messages")
+			return fmt.Errorf("failed to search for new messages: %w", response.err)
 		}
+		searchResult = response.result
 	case <-time.After(30 * time.Second):
 		c.log.Error().Msg("IMAP search timed out after 30 seconds")
 		return fmt.Errorf("IMAP search timed out")
 	}
 	
 	c.log.Debug().Msg("IMAP search completed")
-	
-	// Get search results
-	searchResult, err := searchCmd.Wait()
-	if err != nil {
-		c.log.Error().Err(err).Msg("Failed to get search results")
-		return fmt.Errorf("failed to get search results: %w", err)
-	}
 	
 	// Get the UIDs from search results
 	newUIDs = searchResult.AllUIDs()
@@ -475,15 +521,8 @@ func (c *Client) checkNewMessages() error {
 	
 	c.log.Info().Int("count", len(newUIDs)).Msg("Found new messages")
 	
-	// Process the new messages
-	for _, uid := range newUIDs {
-		if err := c.processMessage(context.Background(), uid); err != nil {
-			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message")
-			// Continue processing other messages even if one fails
-		}
-	}
-	
-	// Update lastUID to the highest UID we processed
+	// Update lastUID before processing to prevent reprocessing the same messages
+	// even if processing fails for individual messages
 	if len(newUIDs) > 0 {
 		// Find the highest UID
 		highestUID := newUIDs[0]
@@ -496,7 +535,16 @@ func (c *Client) checkNewMessages() error {
 		c.mu.Lock()
 		c.lastUID = highestUID
 		c.mu.Unlock()
-		c.log.Info().Uint32("new_last_uid", uint32(highestUID)).Msg("Updated lastUID after processing messages")
+		c.log.Info().Uint32("new_last_uid", uint32(highestUID)).Msg("Updated lastUID before processing to prevent reprocessing")
+	}
+	
+	// Process the new messages
+	for _, uid := range newUIDs {
+		if err := c.processMessage(context.Background(), uid); err != nil {
+			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message - will not reprocess this UID")
+			// Continue processing other messages even if one fails
+			// Note: lastUID was already updated above, so this message won't be reprocessed
+		}
 	}
 	
 	c.log.Info().Msg("Sync completed successfully")
@@ -527,6 +575,54 @@ func (c *Client) processNewMessages(fromUID, toUID imap.UID) {
 			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message")
 		}
 	}
+}
+
+// getPortalLock returns a mutex for a given portal ID, creating it if needed
+func (c *Client) getPortalLock(id string) *sync.Mutex {
+	if mu, ok := c.portalLocks.Load(id); ok {
+		return mu.(*sync.Mutex)
+	}
+	newMu := &sync.Mutex{}
+	actual, _ := c.portalLocks.LoadOrStore(id, newMu)
+	return actual.(*sync.Mutex)
+}
+
+// ensurePortalRoom ensures the Matrix room exists for the given portal.
+// It is safe to call concurrently; creation will be serialized per-portal.
+func (c *Client) ensurePortalRoom(ctx context.Context, portal *bridgev2.Portal) error {
+	if portal == nil {
+		return fmt.Errorf("nil portal")
+	}
+	id := string(portal.ID)
+	mu := c.getPortalLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-check after acquiring lock
+	if portal.MXID != "" {
+		return nil
+	}
+
+	// Attempt to create the room with small retries for transient errors
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		c.log.Info().Str("portal_id", id).Int("attempt", i+1).Msg("Creating Matrix room for portal")
+		// Note: Depending on mautrix bridgev2 version, an Ensure* method may exist.
+		// We use CreateMatrixRoom here; it's expected to be idempotent if the room already got created.
+		if err := portal.CreateMatrixRoom(ctx, c.login, nil); err != nil {
+			lastErr = err
+			c.log.Warn().Err(err).Str("portal_id", id).Int("attempt", i+1).Msg("CreateMatrixRoom failed, will retry")
+			time.Sleep(time.Duration(100*(i+1)) * time.Millisecond)
+			continue
+		}
+		if portal.MXID != "" {
+			c.log.Info().Str("portal_id", id).Str("mxid", portal.MXID.String()).Msg("Matrix room created for portal")
+			return nil
+		}
+		// If still empty, brief wait and recheck
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("failed to create Matrix room: %w", lastErr)
 }
 
 // processMessage fetches and processes a single email message
@@ -573,6 +669,50 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID) error {
 
 		// Convert to Matrix event and queue it
 		matrixEvent := c.processor.ToMatrixEvent(ctx, emailMessage, c.login)
+
+		// Ensure portal exists before queuing the event
+		portalKey := emailMessage.PortalKey
+		c.log.Info().Str("portal_key", string(portalKey.ID)).Str("receiver", string(portalKey.Receiver)).Msg("Checking if portal exists before queuing event")
+		
+		// Debug: Log detailed portal key information
+		c.log.Debug().Interface("portal_key_full", portalKey).Msg("Full portal key details")
+		
+		portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, portalKey)
+		if err != nil {
+			c.log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to check existing portal")
+			return fmt.Errorf("failed to check portal existence: %w", err)
+		}
+		
+		if portal == nil {
+			c.log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal doesn't exist, creating it")
+			// Create the portal - this will call GetChatInfo to set up the room
+			portal, err = c.login.Bridge.GetPortalByKey(ctx, portalKey)
+			if err != nil {
+				c.log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to create portal")
+				return fmt.Errorf("failed to create portal for email thread: %w", err)
+			}
+			c.log.Info().Str("portal_key", string(portalKey.ID)).Interface("portal", portal).Msg("Successfully created portal for email thread")
+		} else {
+			c.log.Info().Str("portal_key", string(portalKey.ID)).Str("portal_mxid", portal.MXID.String()).Interface("portal_info", portal).Msg("Portal already exists - no need to create")
+		}
+		
+		// CRITICAL: Force Matrix room creation if portal exists but has no MXID
+		if portal.MXID == "" {
+			c.log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal exists but has no Matrix room - forcing room creation")
+			// Force room creation by calling the portal's CreateMatrixRoom method
+			if err := portal.CreateMatrixRoom(ctx, c.login, nil); err != nil {
+				c.log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to force create Matrix room")
+				return fmt.Errorf("failed to create Matrix room for portal: %w", err)
+			}
+			c.log.Info().Str("portal_key", string(portalKey.ID)).Str("new_mxid", portal.MXID.String()).Msg("Successfully forced Matrix room creation")
+		}
+		
+		// Debug: Force a small delay to see if this helps with timing
+		// Ensure the Matrix room exists (idempotent, concurrency-safe)
+		if err := c.ensurePortalRoom(ctx, portal); err != nil {
+			c.log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to ensure Matrix room exists for portal")
+			return err
+		}
 
 		// Queue the event with the bridge framework
 		if !c.login.QueueRemoteEvent(matrixEvent).Success {

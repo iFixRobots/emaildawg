@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"net/textproto"
 	"strings"
@@ -183,31 +185,24 @@ func (p *Processor) parseIMAPFetchData(fetchData *imapclient.FetchMessageData) (
 
 // parseMessageBody extracts text and HTML content from IMAP body sections
 func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textContent, htmlContent string, err error) {
-	// Look for body sections in fetch buffer
+	// Prefer MIME parsing for any non-header sections to avoid dumping boundaries/headers
 	for _, section := range buf.BodySection {
 		if len(section.Bytes) == 0 {
 			continue
 		}
-
-		// Try to determine content type from the section specifier
-		switch {
-		case section.Section.Specifier == imap.PartSpecifierText:
-			// Plain text content
-			if textContent == "" {
-				textContent = string(section.Bytes)
-			}
-		case section.Section.Specifier == imap.PartSpecifierHeader:
-			// Parse headers for additional threading info (handled separately)
+		if section.Section.Specifier == imap.PartSpecifierHeader {
 			continue
-		default:
-			// Try to parse as a full message or MIME content
-			text, html := p.parseMIMEContent(section.Bytes)
-			if text != "" && textContent == "" {
-				textContent = text
-			}
-			if html != "" && htmlContent == "" {
-				htmlContent = html
-			}
+		}
+		text, html := p.parseMIMEContent(section.Bytes)
+		if text != "" && textContent == "" {
+			textContent = text
+		}
+		if html != "" && htmlContent == "" {
+			htmlContent = html
+		}
+		// If both found, we can stop early
+		if textContent != "" && htmlContent != "" {
+			break
 		}
 	}
 
@@ -228,11 +223,15 @@ func (p *Processor) parseMIMEContent(data []byte) (textContent, htmlContent stri
 		return string(data), ""
 	}
 
+	// Content-Transfer-Encoding for the top-level entity
+	cte := strings.ToLower(msg.Header.Get("Content-Transfer-Encoding"))
+
 	// Check Content-Type header
 	contentType := msg.Header.Get("Content-Type")
 	if contentType == "" {
 		// No content type, assume plain text
-		body, _ := io.ReadAll(msg.Body)
+		decoded := decodeBody(msg.Body, cte)
+		body, _ := io.ReadAll(decoded)
 		return string(body), ""
 	}
 
@@ -240,23 +239,27 @@ func (p *Processor) parseMIMEContent(data []byte) (textContent, htmlContent stri
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		// Fallback to plain text
-		body, _ := io.ReadAll(msg.Body)
+		decoded := decodeBody(msg.Body, cte)
+		body, _ := io.ReadAll(decoded)
 		return string(body), ""
 	}
 
 	switch {
 	case strings.HasPrefix(mediaType, "text/plain"):
-		body, _ := io.ReadAll(msg.Body)
+		decoded := decodeBody(msg.Body, cte)
+		body, _ := io.ReadAll(decoded)
 		return string(body), ""
 	case strings.HasPrefix(mediaType, "text/html"):
-		body, _ := io.ReadAll(msg.Body)
+		decoded := decodeBody(msg.Body, cte)
+		body, _ := io.ReadAll(decoded)
 		return "", string(body)
 	case strings.HasPrefix(mediaType, "multipart/"):
 		// Handle multipart messages
 		return p.parseMultipartContent(msg.Body, params["boundary"])
 	default:
 		// Unknown content type, try to read as text
-		body, _ := io.ReadAll(msg.Body)
+		decoded := decodeBody(msg.Body, cte)
+		body, _ := io.ReadAll(decoded)
 		return string(body), ""
 	}
 }
@@ -277,8 +280,10 @@ func (p *Processor) parseMultipartContent(body io.Reader, boundary string) (text
 			continue
 		}
 
-		// Read part content
-		partData, err := io.ReadAll(part)
+		// Decode part body according to Content-Transfer-Encoding
+		cte := strings.ToLower(part.Header.Get("Content-Transfer-Encoding"))
+		decoded := decodeBody(part, cte)
+		partData, err := io.ReadAll(decoded)
 		part.Close()
 		if err != nil {
 			continue
@@ -442,6 +447,18 @@ func (p *Processor) extractReferencesFromHeaders(buf *imapclient.FetchMessageBuf
 	return nil
 }
 
+// decodeBody wraps the reader according to Content-Transfer-Encoding
+func decodeBody(r io.Reader, cte string) io.Reader {
+	switch cte {
+	case "quoted-printable":
+		return quotedprintable.NewReader(r)
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, r)
+	default:
+		return r
+	}
+}
+
 // formatIMAPAddress converts an IMAP address to string format
 func formatIMAPAddress(addr *imap.Address) string {
 	if addr == nil {
@@ -562,16 +579,6 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		content.Body = "[No text content]"
 	}
 
-	// Add subject line if this is the first message in thread or subject changed
-	if e.shouldIncludeSubject() {
-		subjectLine := fmt.Sprintf("📧 **%s**\n\n", e.emailMessage.Subject)
-		content.Body = subjectLine + content.Body
-		
-		if content.FormattedBody != "" {
-			content.FormattedBody = fmt.Sprintf("<strong>📧 %s</strong><br><br>%s", 
-				e.emailMessage.Subject, content.FormattedBody)
-		}
-	}
 
 	// Add participant change notification if any
 	if participantChangeMsg := generateParticipantChangeMessage(e.emailMessage.Thread); participantChangeMsg != "" {
@@ -620,12 +627,6 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 	}, nil
 }
 
-// shouldIncludeSubject determines if the subject line should be included in the message
-func (e *EmailMatrixEvent) shouldIncludeSubject() bool {
-	// For now, always include subject for the first message
-	// In a more sophisticated implementation, we'd track whether the subject has changed
-	return e.emailMessage.MessageID == networkid.MessageID(fmt.Sprintf("email:%s", e.emailMessage.Thread.ThreadID))
-}
 
 // convertAttachmentToMatrix uploads an email attachment to Matrix and returns a ConvertedMessagePart
 func (e *EmailMatrixEvent) convertAttachmentToMatrix(ctx context.Context, attachment *EmailAttachment, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessagePart, error) {

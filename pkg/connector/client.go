@@ -277,7 +277,7 @@ func (ec *EmailClient) Stop(ctx context.Context) {
 	ec.UserLogin.Log.Info().Msg("Email client stopped")
 }
 
-// startIDLEWithRetry attempts to start IDLE with connection reset if needed
+// startIDLEWithRetry attempts to start IDLE with ONE connection reset if needed
 func (ec *EmailClient) startIDLEWithRetry() error {
 	// First, test connection health with a NOOP command
 	if err := ec.IMAPClient.TestConnection(); err != nil {
@@ -287,20 +287,22 @@ func (ec *EmailClient) startIDLEWithRetry() error {
 		}
 	}
 	
-	// Try to start IDLE
+	// Try to start IDLE (first attempt)
 	if err := ec.IMAPClient.StartIDLE(); err != nil {
 		// Check if it's the "IDLE already running" error
 		if strings.Contains(err.Error(), "IDLE already") || strings.Contains(err.Error(), "already running") {
-			ec.UserLogin.Log.Warn().Err(err).Msg("Server reports IDLE already running - forcing connection reset")
+			ec.UserLogin.Log.Warn().Err(err).Msg("Server reports IDLE already running - attempting ONE reconnection")
 			
-			// Force reconnection to clear server-side state
+			// Force reconnection to clear server-side state (ONLY ONCE)
 			if err := ec.reconnectIMAPClient(); err != nil {
 				return fmt.Errorf("failed to reconnect after IDLE conflict: %w", err)
 			}
 			
-			// Try IDLE again on fresh connection
+			// Try IDLE again on fresh connection (FINAL ATTEMPT)
 			if err := ec.IMAPClient.StartIDLE(); err != nil {
-				return fmt.Errorf("IDLE failed even after connection reset: %w", err)
+				// If it still fails, give up - don't loop forever
+				ec.UserLogin.Log.Error().Err(err).Msg("IDLE failed even after reconnection - giving up to prevent connection loop")
+				return fmt.Errorf("IDLE startup failed: %w", err)
 			}
 			
 			ec.UserLogin.Log.Info().Msg("Successfully started IDLE after connection reset")
@@ -407,22 +409,33 @@ func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
 	
 	// Check if we need to perform a sync
 	if time.Since(ec.lastSyncTime) < time.Minute {
+		ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Skipping sync - too soon since last sync")
 		return
 	}
 	
-	ec.UserLogin.Log.Debug().Msg("Performing periodic sync")
+	ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Starting periodic sync")
 	
 	// Trigger IMAP to check for new messages (in case IDLE missed something)
 	if ec.IMAPClient != nil && ec.IMAPClient.IsConnected() {
-		if err := ec.IMAPClient.CheckNewMessages(); err != nil {
-			ec.UserLogin.Log.Warn().Err(err).Msg("Failed to check for new messages during periodic sync")
+		if ec.IMAPClient.IsIDLERunning() {
+			ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] IDLE is running - triggering manual check (will interrupt IDLE)")
+		} else {
+			ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] IDLE not running - safe to check messages")
 		}
+		
+		if err := ec.IMAPClient.CheckNewMessages(); err != nil {
+			ec.UserLogin.Log.Warn().Err(err).Msg("[PERIODIC SYNC] Failed to check for new messages during periodic sync")
+		} else {
+			ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Message check completed successfully")
+		}
+	} else {
+		ec.UserLogin.Log.Warn().Msg("[PERIODIC SYNC] IMAP client not available or not connected")
 	}
 	
 	// Update sync time
 	ec.lastSyncTime = time.Now()
 	
-	ec.UserLogin.Log.Debug().Msg("Periodic sync completed")
+	ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Periodic sync completed")
 }
 
 // Handler methods for different sync actions
@@ -494,7 +507,7 @@ func (ec *EmailClient) handleUpdateThread(ctx context.Context, item *syncQueueIt
 	
 	// Get the portal for this thread
 	portalKey := networkid.PortalKey{
-		ID:       networkid.PortalID(item.threadID),
+		ID:       MakePortalID(item.threadID),
 		Receiver: ec.UserLogin.ID,
 	}
 	
@@ -529,6 +542,46 @@ func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem
 	
 	// Convert the email message to a Matrix event
 	matrixEvent := ec.Main.Processor.ToMatrixEvent(ctx, messageData, ec.UserLogin)
+	
+	// CRITICAL: Ensure portal exists before queuing the event
+	portalKey := messageData.PortalKey
+	ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Checking if portal exists before queuing event")
+	
+	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil {
+		ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to check existing portal")
+		return
+	}
+	
+	if portal == nil {
+		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal doesn't exist, creating it")
+		// Create the portal - this will call GetChatInfo to set up the room
+		portal, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+		if err != nil {
+			ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to create portal")
+			return
+		}
+		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Successfully created portal for email thread")
+	} else {
+		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal already exists - no need to create")
+	}
+	
+	// Double-check: verify portal still exists right before queuing
+	portalCheck, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil {
+		ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to double-check portal existence")
+		return
+	}
+	if portalCheck == nil {
+		ec.UserLogin.Log.Warn().Str("portal_key", string(portalKey.ID)).Msg("Portal disappeared between creation and queuing - this indicates a race condition")
+		// Try creating again as a fallback
+		portalCheck, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+		if err != nil {
+			ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to recreate disappeared portal")
+			return
+		}
+		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Successfully recreated disappeared portal")
+	}
 	
 	// Queue the event with the bridge framework - this will create the room if needed
 	result := ec.UserLogin.QueueRemoteEvent(matrixEvent)
@@ -565,7 +618,7 @@ func (ec *EmailClient) handleParticipantChange(ctx context.Context, item *syncQu
 	
 	// Get the portal for this thread
 	portalKey := networkid.PortalKey{
-		ID:       networkid.PortalID(item.threadID),
+		ID:       MakePortalID(item.threadID),
 		Receiver: ec.UserLogin.ID,
 	}
 	
@@ -595,8 +648,9 @@ func (ec *EmailClient) handleParticipantChange(ctx context.Context, item *syncQu
 
 // GetCapabilities returns the capabilities of this network
 func (ec *EmailClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
-	// Email threads are basic - no special features
-	return nil
+	// Must return a non-nil RoomFeatures or mautrix will panic when calling GetID.
+	// Email threads are simple and read-only, so use default features.
+	return &event.RoomFeatures{}
 }
 
 func (ec *EmailClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {

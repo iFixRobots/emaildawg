@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -144,8 +145,14 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 		threadID = threadID[7:] // Remove "thread:" prefix
 	}
 
-	// Create basic room configuration
-	// Room details will be updated when actual emails are processed
+	// If we have richer thread info, build the room using RoomManager
+	if ec.ThreadManager != nil && ec.RoomManager != nil {
+		if thread := ec.ThreadManager.GetThreadByID(threadID); thread != nil {
+			return ec.RoomManager.GetChatInfoForThread(ctx, thread, *userLogin)
+		}
+	}
+
+	// Fallback: basic room configuration when thread is not yet known
 	roomName := fmt.Sprintf("Email Thread: %s", threadID)
 	roomTopic := "Email thread - messages will appear here when emails are received"
 
@@ -155,12 +162,8 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 	chatInfo := &bridgev2.ChatInfo{
 		Name:   &roomName,
 		Topic:  &roomTopic,
-		Avatar: nil, // Could add email provider icons in the future
-		
-		// Default room type for email threads
-		Type: nil,
-		
-		// Participants will be added dynamically as emails are processed
+		Avatar: nil,
+		Type:  ptr.Ptr(database.RoomTypeDefault),
 		Members: &bridgev2.ChatMemberList{
 			Members: chatMembers,
 			IsFull:  true,
@@ -170,7 +173,7 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 	ec.Bridge.Log.Debug().
 		Str("thread_id", threadID).
 		Str("room_name", roomName).
-		Msg("Created ChatInfo for email thread")
+		Msg("Created fallback ChatInfo for email thread")
 
 	return chatInfo, nil
 }

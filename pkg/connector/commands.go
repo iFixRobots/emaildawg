@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.mau.fi/mautrix-emaildawg/pkg/imap"
 	"maunium.net/go/mautrix/bridgev2"
@@ -425,13 +426,28 @@ func fnSync(ce *commands.Event) {
 	var successes []string
 	var failures []string
 
+	// Create context with timeout for all sync operations
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	for _, login := range logins {
 		if client, ok := login.Client.(*EmailClient); ok {
 			if client.IMAPClient != nil && client.IMAPClient.IsConnected() {
-				if err := client.IMAPClient.CheckNewMessages(); err != nil {
-					failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
-				} else {
-					successes = append(successes, client.Email)
+				// Use channel to handle timeout for each account
+				done := make(chan error, 1)
+				go func() {
+					done <- client.IMAPClient.CheckNewMessages()
+				}()
+				
+				select {
+				case err := <-done:
+					if err != nil {
+						failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
+					} else {
+						successes = append(successes, client.Email)
+					}
+				case <-ctx.Done():
+					failures = append(failures, fmt.Sprintf("%s: sync timed out after 60 seconds", client.Email))
 				}
 			} else {
 				failures = append(failures, fmt.Sprintf("%s: not connected", client.Email))

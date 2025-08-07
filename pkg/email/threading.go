@@ -53,6 +53,13 @@ func NewThreadManager() *ThreadManager {
 	}
 }
 
+// GetThreadByID returns a thread by its ThreadID if known
+func (tm *ThreadManager) GetThreadByID(threadID string) *EmailThread {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.knownThreads[threadID]
+}
+
 // ParsedEmail represents a parsed email message
 type ParsedEmail struct {
 	MessageID   string
