@@ -182,34 +182,6 @@ func fnStatus(ce *commands.Event) {
 }
 
 func fnLogin(ce *commands.Event) {
-	// Check for required arguments
-	if len(ce.Args) < 2 {
-		ce.Reply(`🔐 **Email Bridge Login**
-
-**Usage:** !email login <email> <password>
-
-**Example:** !email login john@gmail.com "myapp password123"
-
-**For App Passwords with spaces:**
-!email login user@gmail.com "qdhw aaxw oosd zpxz"
-
-**Important Notes:**
-• For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
-• App Passwords have spaces - you can use quotes for clarity
-• The bridge will automatically detect your email provider settings
-• Your password will be encrypted and stored securely
-
-**App Password Setup:**
-📱 **Gmail:** Settings → Security → 2-Step Verification → App passwords
-📱 **Yahoo:** Account Info → Account security → Generate app password
-📱 **Outlook:** Security → Sign-in options → App passwords
-
-**Popular Providers Supported:**
-✅ Gmail, Yahoo, Outlook, iCloud - Auto-configured
-✅ Custom IMAP servers - Auto-detected`)
-		return
-	}
-
 	// Check if user has any active logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) > 0 {
@@ -217,42 +189,23 @@ func fnLogin(ce *commands.Event) {
 		return
 	}
 
-	email := strings.TrimSpace(ce.Args[0])
-	// Join all remaining args as the password to handle spaces
-	password := strings.Join(ce.Args[1:], " ")
-
-	// Validate email format
-	if !strings.Contains(email, "@") || len(strings.Split(email, "@")) != 2 {
-		ce.Reply("❌ Invalid email format. Please use: `!email login your@email.com yourpassword`")
-		return
-	}
-
-	ce.Reply("📧 Connecting to **%s**...", email)
-
-	// Create login process manually
+	// Start the interactive login process using bridgev2
 	ctx := context.Background()
-	loginProcess := &EmailLoginProcess{
-		user:     ce.User,
-		email:    email,
-		username: email,
-		password: password,
-	}
-
-	// Submit the credentials directly
-	step, err := loginProcess.SubmitUserInput(ctx, map[string]string{
-		"email":    email,
-		"password": password,
-	})
+	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
 	if err != nil {
-		ce.Reply("❌ **Login Failed:** %s", err.Error())
+		ce.Reply("❌ Failed to start login process: %s", err.Error())
 		return
 	}
 
-	if step.Type == bridgev2.LoginStepTypeComplete {
-		ce.Reply("✅ **Successfully connected to %s!**\n\n📬 New emails will now appear as Matrix rooms. The bridge is monitoring your inbox in real-time.", email)
-	} else {
-		ce.Reply("⚠️ Login process incomplete. Please try again or contact support.")
+	// Start the login flow
+	step, err := loginProcess.Start(ctx)
+	if err != nil {
+		ce.Reply("❌ Failed to start login: %s", err.Error())
+		return
 	}
+
+	// Send the login instructions to the user
+	ce.Reply(step.Instructions)
 }
 
 func fnLogout(ce *commands.Event) {
