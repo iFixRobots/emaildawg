@@ -228,6 +228,13 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 
 // saveAccount saves the email account credentials to database
 func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
+	logger := ConnectorInstance.Bridge.Log.With().
+		Str("component", "login_save").
+		Str("email", elp.email).
+		Logger()
+
+	logger.Info().Msg("Saving account credentials to database")
+
 	// Auto-detect provider settings for saving
 	domain := strings.ToLower(strings.Split(elp.email, "@")[1])
 	var host string
@@ -257,7 +264,15 @@ func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
 		LastSyncTime: time.Now(),
 	}
 
-	return ConnectorInstance.DB.UpsertAccount(ctx, account)
+	logger.Debug().Str("host", host).Int("port", port).Bool("tls", tls).Msg("Attempting to save account to database")
+
+	if err := ConnectorInstance.DB.UpsertAccount(ctx, account); err != nil {
+		logger.Error().Err(err).Msg("Failed to save account credentials to database")
+		return err
+	}
+
+	logger.Info().Msg("Successfully saved account credentials to database")
+	return nil
 }
 
 // ProviderInfo contains information about an email provider
