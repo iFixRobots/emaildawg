@@ -189,8 +189,27 @@ func fnLogin(ce *commands.Event) {
 		return
 	}
 
-	// Start the interactive login process using bridgev2
 	ctx := context.Background()
+
+	// Check if the user provided arguments in the command
+	args := strings.TrimSpace(ce.RawArgs)
+	if args != "" {
+		// Parse text arguments: email:user@domain.com password:pass or password:"quoted pass"
+		email, password, err := parseLoginArgs(args)
+		if err != nil {
+			ce.Reply("❌ %s\n\n**Usage:** `!email login email:your@email.com password:yourpassword`\n**Or:** `!email login email:your@email.com password:\"password with spaces\"`", err.Error())
+			return
+		}
+
+		// Process the text-based login
+		err = processTextLogin(ctx, ce, email, password)
+		if err != nil {
+			ce.Reply("❌ Login failed: %s", err.Error())
+		}
+		return
+	}
+
+	// Fallback to interactive login process using bridgev2 forms
 	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
 	if err != nil {
 		ce.Reply("❌ Failed to start login process: %s", err.Error())
@@ -204,8 +223,8 @@ func fnLogin(ce *commands.Event) {
 		return
 	}
 
-	// Send the login instructions to the user
-	ce.Reply(step.Instructions)
+	// Send the updated login instructions to the user
+	ce.Reply(buildEnhancedLoginInstructions(step.Instructions))
 }
 
 func fnLogout(ce *commands.Event) {
@@ -510,4 +529,132 @@ func fnReconnect(ce *commands.Event) {
 	}
 
 	ce.Reply(result.String())
+}
+
+// parseLoginArgs parses command arguments in the format: email:user@domain.com password:pass or password:"quoted pass"
+func parseLoginArgs(args string) (email, password string, err error) {
+	// Split by spaces but preserve quoted strings
+	parts := parseQuotedArgs(args)
+	
+	for _, part := range parts {
+		if strings.HasPrefix(part, "email:") {
+			email = strings.TrimPrefix(part, "email:")
+		} else if strings.HasPrefix(part, "password:") {
+			password = strings.TrimPrefix(part, "password:")
+		}
+	}
+	
+	if email == "" {
+		return "", "", fmt.Errorf("email is required")
+	}
+	if password == "" {
+		return "", "", fmt.Errorf("password is required")
+	}
+	
+	// Validate email format
+	if !strings.Contains(email, "@") || !strings.Contains(email, ".") {
+		return "", "", fmt.Errorf("invalid email format")
+	}
+	
+	return email, password, nil
+}
+
+// parseQuotedArgs splits arguments while preserving quoted strings
+func parseQuotedArgs(args string) []string {
+	var result []string
+	var current strings.Builder
+	inQuotes := false
+	escaped := false
+	
+	for i, r := range args {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '"':
+			inQuotes = !inQuotes
+		case r == ' ' && !inQuotes:
+			if current.Len() > 0 {
+				result = append(result, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+		
+		// Handle end of string
+		if i == len(args)-1 && current.Len() > 0 {
+			result = append(result, current.String())
+		}
+	}
+	
+	return result
+}
+
+// processTextLogin processes a text-based login using the same flow as the interactive login
+func processTextLogin(ctx context.Context, ce *commands.Event, email, password string) error {
+	// Create a login process
+	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
+	if err != nil {
+		return fmt.Errorf("failed to create login process: %w", err)
+	}
+	
+	// Cast to our EmailLoginProcess to access internal methods
+	emailLogin, ok := loginProcess.(*EmailLoginProcess)
+	if !ok {
+		return fmt.Errorf("unexpected login process type")
+	}
+	
+	// Set the credentials directly
+	emailLogin.email = email
+	emailLogin.username = email
+	emailLogin.password = password
+	
+	// Submit the credentials as if they came from form input
+	inputData := map[string]string{
+		"email":    email,
+		"password": password,
+	}
+	
+	step, err := emailLogin.SubmitUserInput(ctx, inputData)
+	if err != nil {
+		return err
+	}
+	
+	// Send success message
+	ce.Reply(step.Instructions)
+	return nil
+}
+
+// buildEnhancedLoginInstructions enhances the form-based instructions with text command info
+func buildEnhancedLoginInstructions(originalInstructions string) string {
+	return `🔐 **Email Bridge Login**
+
+**Method 1: Quick Command**
+` + "`!email login email:your@email.com password:yourpassword`" + `
+` + "`!email login email:your@email.com password:\"password with spaces\"`" + `
+
+**Method 2: Form Fields (if supported by your client)**
+📧 **Please enter your email credentials using the form fields below.**
+
+**Important Notes:**
+• For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
+• The bridge will automatically detect your email provider settings
+• Your password will be encrypted and stored securely
+
+**App Password Setup Guide:**
+📱 **Gmail:** Settings → Security → 2-Step Verification → App passwords
+📱 **Yahoo:** Account Info → Account security → Generate app password  
+📱 **Outlook:** Security → Sign-in options → App passwords
+📱 **iCloud:** Sign-In and Security → App-Specific Passwords
+
+**Popular Providers Supported:**
+✅ Gmail, Yahoo, Outlook, iCloud, FastMail - Auto-configured
+✅ Custom IMAP servers - Auto-detected
+
+*The bridge will test your IMAP connection automatically after you submit your credentials.*
+
+**Need help?** Use ` + "`!email help`" + ` for more information or ` + "`!email status`" + ` to check connection status.`
 }

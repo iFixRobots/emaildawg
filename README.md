@@ -52,8 +52,8 @@ This automatically installs dependencies, builds with encryption, and shows next
 
 ### Option 2: Bridge Manager (Ready for Integration!)
 ```bash
-bbctl register emaildawg https://github.com/iFixRobots/emaildawg
-bbctl run emaildawg
+bbctl register sh-emaildawg https://github.com/iFixRobots/emaildawg
+bbctl run sh-emaildawg
 ```
 
 ### Option 2: Docker Compose (Fully Working)
