@@ -1,0 +1,433 @@
+package email
+
+import (
+	"net/mail"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// EmailAttachment represents an email attachment (forward declaration)
+// The actual struct is defined in processor.go to avoid circular imports
+type EmailAttachment struct {
+	Filename    string
+	ContentType string
+	Size        int64
+	Data        []byte
+}
+
+// EmailThread represents an email conversation thread
+type EmailThread struct {
+	ThreadID  string   // Message-ID of the first email in thread
+	Subject   string   // Email subject line
+	Participants []string // List of email addresses currently active in thread
+	MessageID string   // Current message ID
+	InReplyTo string   // Message this is replying to (for threading)
+	References []string // Full thread chain
+	
+	// Participant change tracking for Matrix room updates
+	AddedParticipants   []string // Participants added in the latest email
+	RemovedParticipants []string // Participants removed in the latest email
+}
+
+// ClearParticipantChanges clears the participant change tracking after processing
+func (thread *EmailThread) ClearParticipantChanges() {
+	thread.AddedParticipants = nil
+	thread.RemovedParticipants = nil
+}
+
+// ThreadManager handles email threading detection and management
+type ThreadManager struct {
+	// Cache of known threads with size limit to prevent memory leaks
+	knownThreads map[string]*EmailThread
+	maxThreads   int
+	lastUsed     map[string]time.Time // For LRU eviction
+	mu           sync.RWMutex
+}
+
+// NewThreadManager creates a new email thread manager
+func NewThreadManager() *ThreadManager {
+	return &ThreadManager{
+		knownThreads: make(map[string]*EmailThread),
+	}
+}
+
+// ParsedEmail represents a parsed email message
+type ParsedEmail struct {
+	MessageID   string
+	InReplyTo   string
+	References  []string
+	Subject     string
+	From        string
+	To          []string
+	Cc          []string
+	Bcc         []string
+	Date        time.Time
+	TextContent string
+	HTMLContent string
+	Attachments []*EmailAttachment
+}
+
+// ParseEmailHeaders parses raw email headers and extracts threading information
+func (tm *ThreadManager) ParseEmailHeaders(rawEmail string) (*ParsedEmail, error) {
+	// Parse email using Go's mail package
+	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
+	if err != nil {
+		return nil, err
+	}
+
+	header := msg.Header
+
+	// Extract basic headers
+	parsed := &ParsedEmail{
+		MessageID: cleanMessageID(header.Get("Message-Id")),
+		InReplyTo: cleanMessageID(header.Get("In-Reply-To")),
+		Subject:   header.Get("Subject"),
+		From:      header.Get("From"),
+	}
+
+	// Parse date
+	if dateStr := header.Get("Date"); dateStr != "" {
+		if date, err := mail.ParseDate(dateStr); err == nil {
+			parsed.Date = date
+		} else {
+			parsed.Date = time.Now() // Fallback to current time
+		}
+	} else {
+		parsed.Date = time.Now()
+	}
+
+	// Parse recipients
+	parsed.To = parseAddressList(header.Get("To"))
+	parsed.Cc = parseAddressList(header.Get("Cc"))
+	parsed.Bcc = parseAddressList(header.Get("Bcc"))
+
+	// Parse References header for full thread chain
+	if references := header.Get("References"); references != "" {
+		parsed.References = parseReferences(references)
+	}
+
+	// Parse email body for text/HTML content
+	// This will be handled by the processor when processing the full IMAP message
+	parsed.TextContent = ""
+	parsed.HTMLContent = ""
+
+	return parsed, nil
+}
+
+// DetermineThread analyzes an email and determines which thread it belongs to
+func (tm *ThreadManager) DetermineThread(email *ParsedEmail) *EmailThread {
+	// Step 1: Check if this is a reply based on In-Reply-To header
+	if email.InReplyTo != "" {
+		if thread := tm.findThreadByMessageID(email.InReplyTo); thread != nil {
+			return tm.addToExistingThread(thread, email)
+		}
+	}
+
+	// Step 2: Check References header for thread chain
+	if len(email.References) > 0 {
+		// Check each reference (starting from the oldest)
+		for _, refID := range email.References {
+			if thread := tm.findThreadByMessageID(refID); thread != nil {
+				return tm.addToExistingThread(thread, email)
+			}
+		}
+	}
+
+	// Step 3: Check for subject-based threading (less reliable)
+	normalizedSubject := normalizeSubject(email.Subject)
+	for _, thread := range tm.knownThreads {
+		if normalizeSubject(thread.Subject) == normalizedSubject {
+			return tm.addToExistingThread(thread, email)
+		}
+	}
+
+	// Step 4: This is a new thread
+	return tm.createNewThread(email)
+}
+
+// findThreadByMessageID finds an existing thread that contains a specific Message-ID
+func (tm *ThreadManager) findThreadByMessageID(messageID string) *EmailThread {
+	for _, thread := range tm.knownThreads {
+		// Check if this message ID is the thread root
+		if thread.ThreadID == messageID {
+			return thread
+		}
+		// Check if this message ID is in the references chain
+		for _, ref := range thread.References {
+			if ref == messageID {
+				return thread
+			}
+		}
+	}
+	return nil
+}
+
+// addToExistingThread adds a new email to an existing thread
+func (tm *ThreadManager) addToExistingThread(thread *EmailThread, email *ParsedEmail) *EmailThread {
+	// Track participant changes
+	oldParticipants := make(map[string]bool)
+	for _, p := range thread.Participants {
+		oldParticipants[strings.ToLower(p)] = true
+	}
+	
+	// Get current email participants (From, To, CC)
+	currentEmailParticipants := make(map[string]bool)
+	
+	// Add sender
+	if fromAddr := extractEmailAddress(email.From); fromAddr != "" {
+		currentEmailParticipants[strings.ToLower(fromAddr)] = true
+	}
+	// Add To recipients
+	for _, addr := range email.To {
+		if cleanAddr := extractEmailAddress(addr); cleanAddr != "" {
+			currentEmailParticipants[strings.ToLower(cleanAddr)] = true
+		}
+	}
+	// Add CC recipients
+	for _, addr := range email.Cc {
+		if cleanAddr := extractEmailAddress(addr); cleanAddr != "" {
+			currentEmailParticipants[strings.ToLower(cleanAddr)] = true
+		}
+	}
+	
+	// Merge with existing participants for the thread's active participant list
+	allParticipants := make(map[string]bool)
+	for participant := range oldParticipants {
+		allParticipants[participant] = true
+	}
+	for participant := range currentEmailParticipants {
+		allParticipants[participant] = true
+	}
+	
+	// Update participants list
+	var newParticipants []string
+	for email := range allParticipants {
+		newParticipants = append(newParticipants, email)
+	}
+	
+	// Store participant changes for Matrix room updates
+	var addedParticipants, removedParticipants []string
+	
+	// Find newly added participants (in current email but not in thread)
+	for participant := range currentEmailParticipants {
+		if !oldParticipants[participant] {
+			addedParticipants = append(addedParticipants, participant)
+		}
+	}
+	
+	// Find potentially removed participants (in thread but not in current email)
+	// Only consider someone "removed" if they were active and are explicitly absent
+	if len(thread.Participants) > 0 { // Only check removals for existing threads
+		for participant := range oldParticipants {
+			if !currentEmailParticipants[participant] {
+				// This participant was removed from the current email
+				removedParticipants = append(removedParticipants, participant)
+			}
+		}
+	}
+	
+	// Update thread with current email participants (represents "active" participants)
+	// This affects who can see new messages
+	var activeParticipants []string
+	for participant := range currentEmailParticipants {
+		activeParticipants = append(activeParticipants, participant)
+	}
+	thread.Participants = activeParticipants
+	
+	// Store metadata for Matrix room management
+	thread.AddedParticipants = addedParticipants
+	thread.RemovedParticipants = removedParticipants
+
+	// Update references chain
+	if email.MessageID != "" {
+		// Add this message to the references chain
+		thread.References = appendUnique(thread.References, email.MessageID)
+	}
+
+	return thread
+}
+
+// createNewThread creates a new email thread
+func (tm *ThreadManager) createNewThread(email *ParsedEmail) *EmailThread {
+	threadID := email.MessageID
+	if threadID == "" {
+		// Fallback: generate thread ID from subject and timestamp
+		threadID = generateThreadID(email.Subject, email.Date)
+	}
+
+	// Collect all participants
+	var participants []string
+	participantMap := make(map[string]bool)
+
+	if fromAddr := extractEmailAddress(email.From); fromAddr != "" {
+		participantMap[strings.ToLower(fromAddr)] = true
+	}
+	for _, addr := range email.To {
+		if cleanAddr := extractEmailAddress(addr); cleanAddr != "" {
+			participantMap[strings.ToLower(cleanAddr)] = true
+		}
+	}
+	for _, addr := range email.Cc {
+		if cleanAddr := extractEmailAddress(addr); cleanAddr != "" {
+			participantMap[strings.ToLower(cleanAddr)] = true
+		}
+	}
+
+	for email := range participantMap {
+		participants = append(participants, email)
+	}
+
+	// Create new thread
+	thread := &EmailThread{
+		ThreadID:     threadID,
+		Subject:      email.Subject,
+		Participants: participants,
+		MessageID:    email.MessageID,
+		InReplyTo:    email.InReplyTo,
+		References:   email.References,
+	}
+
+	// Add to known threads
+	tm.knownThreads[threadID] = thread
+
+	return thread
+}
+
+// Helper functions
+
+// cleanMessageID removes angle brackets from Message-ID
+func cleanMessageID(messageID string) string {
+	messageID = strings.TrimSpace(messageID)
+	messageID = strings.TrimPrefix(messageID, "<")
+	messageID = strings.TrimSuffix(messageID, ">")
+	return messageID
+}
+
+// parseAddressList parses a comma-separated list of email addresses
+func parseAddressList(addressList string) []string {
+	if addressList == "" {
+		return nil
+	}
+
+	// Use Go's mail package to properly parse addresses
+	addresses, err := mail.ParseAddressList(addressList)
+	if err != nil {
+		// Fallback to simple comma splitting
+		parts := strings.Split(addressList, ",")
+		var result []string
+		for _, part := range parts {
+			if addr := extractEmailAddress(strings.TrimSpace(part)); addr != "" {
+				result = append(result, addr)
+			}
+		}
+		return result
+	}
+
+	var result []string
+	for _, addr := range addresses {
+		result = append(result, addr.Address)
+	}
+	return result
+}
+
+// parseReferences parses the References header into individual Message-IDs
+func parseReferences(references string) []string {
+	// References header contains space-separated Message-IDs in angle brackets
+	re := regexp.MustCompile(`<([^>]+)>`)
+	matches := re.FindAllStringSubmatch(references, -1)
+	
+	var result []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			result = append(result, match[1])
+		}
+	}
+	return result
+}
+
+// extractEmailAddress extracts email address from "Name <email@domain.com>" format
+func extractEmailAddress(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+
+	// Use mail package to parse
+	addr, err := mail.ParseAddress(input)
+	if err == nil {
+		return addr.Address
+	}
+
+	// Fallback: simple regex extraction
+	re := regexp.MustCompile(`<([^>]+)>`)
+	if matches := re.FindStringSubmatch(input); len(matches) > 1 {
+		return matches[1]
+	}
+
+	// If no angle brackets, check if it looks like an email
+	if strings.Contains(input, "@") && strings.Contains(input, ".") {
+		return input
+	}
+
+	return ""
+}
+
+// normalizeSubject removes common email prefixes and normalizes subject for threading
+func normalizeSubject(subject string) string {
+	subject = strings.TrimSpace(subject)
+	subject = strings.ToLower(subject)
+	
+	// Remove common prefixes
+	prefixes := []string{"re:", "fwd:", "fw:", "re[", "fwd[", "fw["}
+	for {
+		trimmed := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(subject, prefix) {
+				if strings.HasSuffix(prefix, "[") {
+					// Handle "Re[2]:" format
+					closeBracket := strings.Index(subject[len(prefix):], "]")
+					if closeBracket != -1 {
+						subject = strings.TrimSpace(subject[len(prefix)+closeBracket+1:])
+						if strings.HasPrefix(subject, ":") {
+							subject = strings.TrimSpace(subject[1:])
+						}
+					} else {
+						subject = strings.TrimSpace(subject[len(prefix):])
+					}
+				} else {
+					subject = strings.TrimSpace(subject[len(prefix):])
+				}
+				trimmed = true
+				break
+			}
+		}
+		if !trimmed {
+			break
+		}
+	}
+	
+	return subject
+}
+
+// generateThreadID generates a fallback thread ID when Message-ID is missing
+func generateThreadID(subject string, date time.Time) string {
+	normalized := normalizeSubject(subject)
+	if normalized == "" {
+		normalized = "no-subject"
+	}
+	
+	// Create a simple hash-like ID
+	return strings.ReplaceAll(normalized, " ", "-") + "-" + date.Format("20060102150405")
+}
+
+// appendUnique appends a string to a slice only if it's not already present
+func appendUnique(slice []string, item string) []string {
+	for _, existing := range slice {
+		if existing == item {
+			return slice
+		}
+	}
+	return append(slice, item)
+}

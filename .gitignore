@@ -1,0 +1,53 @@
+# Binaries and build artifacts
+mautrix-emaildawg
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Configuration and runtime files  
+config.yaml
+registration.yaml
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+
+# Backup files
+*.bak
+*.orig
+*.tmp
+
+# Docker
+.env
+
+# Testing
+coverage.txt

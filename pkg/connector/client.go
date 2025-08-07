@@ -1,0 +1,533 @@
+package connector
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/status"
+	"maunium.net/go/mautrix/event"
+
+	"go.mau.fi/mautrix-emaildawg/pkg/email"
+	"go.mau.fi/mautrix-emaildawg/pkg/imap"
+)
+
+// EmailClient implements bridgev2.NetworkAPI for email accounts
+type EmailClient struct {
+	Main      *EmailConnector
+	UserLogin *bridgev2.UserLogin
+	
+	// Email account information
+	Email    string
+	Username string
+	Password string
+	
+	// IMAP client
+	IMAPClient *imap.Client
+	
+	// State management
+	isConnected    atomic.Bool
+	stopLoops      atomic.Pointer[context.CancelFunc]
+	
+	// Synchronization
+	historySyncMutex sync.Mutex
+	lastSyncTime     time.Time
+	
+	// Background processing
+	syncQueue     chan *syncQueueItem
+	syncQueueLock sync.Mutex
+}
+
+type syncQueueItem struct {
+	threadID string
+	action   string
+	data     any
+}
+
+var (
+	_ bridgev2.NetworkAPI = (*EmailClient)(nil)
+)
+
+// EmailClientErrors
+var (
+	EmailNotLoggedIn     = status.BridgeStateErrorCode("E-EMAIL-001")
+	EmailConnectionFailed = status.BridgeStateErrorCode("E-EMAIL-002")
+)
+
+func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
+	// Create email client for this login
+	emailClient := &EmailClient{
+		Main:      ec,
+		UserLogin: login,
+		syncQueue: make(chan *syncQueueItem, 100),
+	}
+	login.Client = emailClient
+	
+	// Extract login metadata
+	loginMetadata := login.Metadata.(*EmailLoginMetadata)
+	if loginMetadata.Email == "" {
+		return nil
+	}
+	
+	emailClient.Email = loginMetadata.Email
+	emailClient.Username = loginMetadata.Username
+	
+	// Load account credentials from database
+	account, err := ec.DB.GetAccount(ctx, login.UserMXID.String(), emailClient.Email)
+	if err != nil {
+		return fmt.Errorf("failed to load email account: %w", err)
+	}
+	
+	if account == nil {
+		ec.Bridge.Log.Debug().Str("email", emailClient.Email).Msg("No account credentials found")
+		return nil
+	}
+	
+	emailClient.Password = account.Password
+	
+	// Create IMAP client
+	logger := login.Log.With().Str("component", "imap").Logger()
+	emailClient.IMAPClient, err = imap.NewClient(
+		emailClient.Email,
+		emailClient.Username, 
+		emailClient.Password,
+		login,
+		&logger,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create IMAP client: %w", err)
+	}
+	
+	// Set the email processor on the IMAP client
+	if ec.Processor != nil {
+		emailClient.IMAPClient.SetProcessor(ec.Processor)
+	}
+	
+	return nil
+}
+
+func (ec *EmailClient) Connect(ctx context.Context) {
+	if ec.IMAPClient == nil {
+		state := status.BridgeState{
+			StateEvent: status.StateBadCredentials,
+			Error:      EmailNotLoggedIn,
+		}
+		ec.UserLogin.BridgeState.Send(state)
+		return
+	}
+	
+	// Connect to IMAP server
+	if err := ec.IMAPClient.Connect(); err != nil {
+		ec.UserLogin.Log.Error().Err(err).Msg("Failed to connect to IMAP server")
+		state := status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      EmailConnectionFailed,
+			Info: map[string]any{
+				"go_error": err.Error(),
+			},
+		}
+		ec.UserLogin.BridgeState.Send(state)
+		return
+	}
+	
+	ec.isConnected.Store(true)
+	
+	// Start IMAP IDLE monitoring
+	if err := ec.IMAPClient.StartIDLE(); err != nil {
+		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE")
+		// Don't fail completely, just log the error
+	}
+	
+	// Start background loops
+	ec.startLoops()
+	
+	// Send connected state
+	state := status.BridgeState{StateEvent: status.StateConnected}
+	ec.UserLogin.BridgeState.Send(state)
+	
+	ec.UserLogin.Log.Info().Msg("Email client connected successfully")
+}
+
+func (ec *EmailClient) Disconnect() {
+	ec.isConnected.Store(false)
+	
+	// Stop background loops
+	if cancel := ec.stopLoops.Swap(nil); cancel != nil {
+		(*cancel)()
+	}
+	
+	// Stop IMAP monitoring and disconnect
+	if ec.IMAPClient != nil {
+		ec.IMAPClient.StopIDLE()
+		ec.IMAPClient.Disconnect()
+	}
+	
+	ec.UserLogin.Log.Info().Msg("Email client disconnected")
+}
+
+func (ec *EmailClient) LogoutRemote(ctx context.Context) {
+	ec.UserLogin.Log.Info().Msg("Logging out from email account")
+	
+	// Remove account from database
+	if err := ec.Main.DB.DeleteAccount(ctx, ec.UserLogin.UserMXID.String(), ec.Email); err != nil {
+		ec.UserLogin.Log.Error().Err(err).Msg("Failed to delete account from database")
+	}
+	
+	// Disconnect gracefully
+	ec.Disconnect()
+	
+	// Remove from IMAP manager
+	if err := ec.Main.IMAPManager.RemoveAccount(ec.UserLogin.UserMXID.String(), ec.Email); err != nil {
+		ec.UserLogin.Log.Error().Err(err).Msg("Failed to remove account from IMAP manager")
+	}
+	
+	// Clear credentials
+	ec.Password = ""
+	ec.IMAPClient = nil
+	
+	ec.UserLogin.Log.Info().Msg("Successfully logged out from email account")
+}
+
+func (ec *EmailClient) IsLoggedIn() bool {
+	return ec.IMAPClient != nil && ec.isConnected.Load()
+}
+
+func (ec *EmailClient) IsConnected() bool {
+	return ec.isConnected.Load()
+}
+
+// Stop gracefully stops all client operations and cleans up resources
+func (ec *EmailClient) Stop(ctx context.Context) {
+	ec.UserLogin.Log.Info().Msg("Stopping email client")
+	
+	// Mark as disconnected first to prevent new items being queued
+	ec.isConnected.Store(false)
+	
+	// Stop all background loops
+	if cancel := ec.stopLoops.Swap(nil); cancel != nil {
+		(*cancel)()
+		// Give goroutines time to exit cleanly
+		time.Sleep(100 * time.Millisecond)
+	}
+	
+	// Disconnect from IMAP server
+	if ec.IMAPClient != nil {
+		ec.IMAPClient.StopIDLE()
+		ec.IMAPClient.Disconnect()
+	}
+	
+	ec.UserLogin.Log.Info().Msg("Email client stopped")
+}
+
+func (ec *EmailClient) startLoops() {
+	ctx, cancel := context.WithCancel(context.Background())
+	ec.stopLoops.Store(&cancel)
+	
+	// Start sync queue processor
+	go ec.syncQueueLoop(ctx)
+	
+	// Start periodic sync checker
+	go ec.periodicSyncLoop(ctx)
+}
+
+func (ec *EmailClient) syncQueueLoop(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			ec.UserLogin.Log.Error().Any("panic", r).Msg("Panic in sync queue loop")
+		}
+	}()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item := <-ec.syncQueue:
+			ec.processSyncItem(ctx, item)
+		}
+	}
+}
+
+func (ec *EmailClient) periodicSyncLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ec.performPeriodicSync(ctx)
+		}
+	}
+}
+
+func (ec *EmailClient) processSyncItem(ctx context.Context, item *syncQueueItem) {
+	ec.UserLogin.Log.Debug().
+		Str("thread_id", item.threadID).
+		Str("action", item.action).
+		Msg("Processing sync queue item")
+	
+	switch item.action {
+	case "create_thread":
+		ec.handleCreateThread(ctx, item)
+	case "update_thread":
+		ec.handleUpdateThread(ctx, item)
+	case "new_message":
+		ec.handleNewMessage(ctx, item)
+	case "participant_change":
+		ec.handleParticipantChange(ctx, item)
+	default:
+		ec.UserLogin.Log.Warn().
+			Str("action", item.action).
+			Msg("Unknown sync action")
+	}
+}
+
+func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
+	ec.historySyncMutex.Lock()
+	defer ec.historySyncMutex.Unlock()
+	
+	// Check if we need to perform a sync
+	if time.Since(ec.lastSyncTime) < time.Minute {
+		return
+	}
+	
+	ec.UserLogin.Log.Debug().Msg("Performing periodic sync")
+	
+	// Trigger IMAP to check for new messages (in case IDLE missed something)
+	if ec.IMAPClient != nil && ec.IMAPClient.IsConnected() {
+		if err := ec.IMAPClient.CheckNewMessages(); err != nil {
+			ec.UserLogin.Log.Warn().Err(err).Msg("Failed to check for new messages during periodic sync")
+		}
+	}
+	
+	// Update sync time
+	ec.lastSyncTime = time.Now()
+	
+	ec.UserLogin.Log.Debug().Msg("Periodic sync completed")
+}
+
+// Handler methods for different sync actions
+
+func (ec *EmailClient) handleCreateThread(ctx context.Context, item *syncQueueItem) {
+	threadData, ok := item.data.(*email.EmailThread)
+	if !ok {
+		ec.UserLogin.Log.Error().
+			Str("thread_id", item.threadID).
+			Msg("Invalid thread data for create action")
+		return
+	}
+	
+	// Create portal for this email thread
+	portalKey := networkid.PortalKey{
+		ID:       networkid.PortalID(fmt.Sprintf("thread:%s", item.threadID)),
+		Receiver: ec.UserLogin.ID,
+	}
+	
+	// Check if portal already exists
+	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil {
+		ec.UserLogin.Log.Error().Err(err).
+			Str("thread_id", item.threadID).
+			Msg("Failed to check existing portal")
+		return
+	}
+	
+	if portal != nil {
+		// Portal already exists, just update it
+		ec.UserLogin.Log.Debug().
+			Str("thread_id", item.threadID).
+			Msg("Portal already exists for thread")
+		return
+	}
+	
+	// Create new portal
+	portal, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+	if err != nil {
+		ec.UserLogin.Log.Error().Err(err).
+			Str("thread_id", item.threadID).
+			Msg("Failed to create portal for email thread")
+		return
+	}
+	
+	// Ensure the Matrix room is created by triggering portal sync
+	if portal.MXID != "" {
+		ec.UserLogin.Log.Info().
+			Str("thread_id", item.threadID).
+			Str("room_id", portal.MXID.String()).
+			Str("subject", threadData.Subject).
+			Msg("Matrix room already exists for email thread")
+	} else {
+		ec.UserLogin.Log.Info().
+			Str("thread_id", item.threadID).
+			Str("subject", threadData.Subject).
+			Msg("Created portal for email thread - room will be created on first message")
+	}
+}
+
+func (ec *EmailClient) handleUpdateThread(ctx context.Context, item *syncQueueItem) {
+	threadData, ok := item.data.(*email.EmailThread)
+	if !ok {
+		ec.UserLogin.Log.Error().
+			Str("thread_id", item.threadID).
+			Msg("Invalid thread data for update action")
+		return
+	}
+	
+	// Get the portal for this thread
+	portalKey := networkid.PortalKey{
+		ID:       networkid.PortalID(item.threadID),
+		Receiver: ec.UserLogin.ID,
+	}
+	
+	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil {
+		ec.UserLogin.Log.Error().Err(err).
+			Str("thread_id", item.threadID).
+			Msg("Failed to get portal for thread update")
+		return
+	}
+	
+	if portal == nil {
+		// Portal doesn't exist yet, create it instead
+		ec.handleCreateThread(ctx, item)
+		return
+	}
+	
+	ec.UserLogin.Log.Debug().
+		Str("thread_id", item.threadID).
+		Str("subject", threadData.Subject).
+		Msg("Updated thread metadata")
+}
+
+func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem) {
+	messageData, ok := item.data.(*email.EmailMessage)
+	if !ok {
+		ec.UserLogin.Log.Error().
+			Str("thread_id", item.threadID).
+			Msg("Invalid message data for new message action")
+		return
+	}
+	
+	// Convert the email message to a Matrix event
+	matrixEvent := ec.Main.Processor.ToMatrixEvent(ctx, messageData, ec.UserLogin)
+	
+	// Queue the event with the bridge framework - this will create the room if needed
+	result := ec.UserLogin.QueueRemoteEvent(matrixEvent)
+	if !result.Success {
+		errorStr := "unknown error"
+		if result.Error != nil {
+			errorStr = result.Error.Error()
+		}
+		ec.UserLogin.Log.Error().
+			Str("thread_id", item.threadID).
+			Str("message_id", string(messageData.MessageID)).
+			Str("error", errorStr).
+			Msg("Failed to queue email message for Matrix bridging")
+		return
+	}
+	
+	ec.UserLogin.Log.Info().
+		Str("thread_id", item.threadID).
+		Str("message_id", string(messageData.MessageID)).
+		Str("from", messageData.From).
+		Str("subject", messageData.Subject).
+		Str("portal_key", string(messageData.PortalKey.ID)).
+		Msg("Successfully queued email message for Matrix bridging")
+}
+
+func (ec *EmailClient) handleParticipantChange(ctx context.Context, item *syncQueueItem) {
+	participantData, ok := item.data.(map[string]interface{})
+	if !ok {
+		ec.UserLogin.Log.Error().
+			Str("thread_id", item.threadID).
+			Msg("Invalid participant data for participant change action")
+		return
+	}
+	
+	// Get the portal for this thread
+	portalKey := networkid.PortalKey{
+		ID:       networkid.PortalID(item.threadID),
+		Receiver: ec.UserLogin.ID,
+	}
+	
+	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
+	if err != nil {
+		ec.UserLogin.Log.Error().Err(err).
+			Str("thread_id", item.threadID).
+			Msg("Failed to get portal for participant change")
+		return
+	}
+	
+	if portal == nil {
+		ec.UserLogin.Log.Warn().
+			Str("thread_id", item.threadID).
+			Msg("Portal not found for participant change")
+		return
+	}
+	
+	// Handle participant changes (adding/removing users from the Matrix room)
+	// This would involve updating the room membership based on email participants
+	
+	ec.UserLogin.Log.Debug().
+		Str("thread_id", item.threadID).
+		Any("participants", participantData).
+		Msg("Processed participant change")
+}
+
+// GetCapabilities returns the capabilities of this network
+func (ec *EmailClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
+	// Email threads are basic - no special features
+	return nil
+}
+
+func (ec *EmailClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
+	// Check if this user ID corresponds to our email account
+	expectedUserID := MakeUserID(ec.Email)
+	return userID == expectedUserID
+}
+
+// GetChatInfo implements the NetworkAPI interface - delegates to connector
+func (ec *EmailClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+	return ec.Main.GetChatInfo(ctx, portal, ec.UserLogin, networkid.PortalKey{ID: portal.ID})
+}
+
+// GetUserInfo implements the NetworkAPI interface - delegates to connector
+func (ec *EmailClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+	return ec.Main.GetUserInfo(ctx, ghost)
+}
+
+// HandleMatrixMessage implements the NetworkAPI interface
+func (ec *EmailClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	// For now, email is read-only from Matrix side
+	ec.UserLogin.Log.Warn().Msg("Received Matrix message for read-only email portal")
+	return &bridgev2.MatrixMessageResponse{
+		DB: nil, // No database message entry needed for rejected message
+	}, nil
+}
+
+// Queue a sync item for background processing
+func (ec *EmailClient) QueueSync(threadID, action string, data any) {
+	if !ec.IsConnected() {
+		return
+	}
+	
+	item := &syncQueueItem{
+		threadID: threadID,
+		action:   action,
+		data:     data,
+	}
+	
+	select {
+	case ec.syncQueue <- item:
+	default:
+		ec.UserLogin.Log.Warn().
+			Str("thread_id", threadID).
+			Str("action", action).
+			Msg("Sync queue is full, dropping sync request")
+	}
+}

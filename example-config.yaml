@@ -1,0 +1,86 @@
+# mautrix-emaildawg configuration file
+# Copy this to config.yaml and edit the values below
+
+# Network-specific config options
+network:
+    # IMAP connection settings  
+    imap:
+        # Default timeout for IMAP connections (in seconds)
+        default_timeout: 30
+
+# Config options that affect the central bridge module
+bridge:
+    # The prefix for commands. Only required in non-management rooms.
+    command_prefix: '!email'
+    # Should the bridge create a space for each login containing the rooms that account is in?
+    personal_filtering_spaces: true
+    # Whether the bridge should set names and avatars explicitly for DM portals.
+    private_chat_portal_meta: true
+    # Should events be handled asynchronously within portal rooms?
+    async_events: false
+    # Should every user have their own portals rather than sharing them?
+    split_portals: false
+    # Should the bridge resend `m.bridge` events to all portals on startup?
+    resend_bridge_info: false
+    # Should bridge connection status be sent to the management room as `m.notice` events?
+    bridge_status_notices: errors
+    
+    # Permissions for using the bridge.
+    # Permitted values:
+    #    relay - Talk through the relaybot (if enabled), no access otherwise  
+    # commands - Access to use commands in the bridge, but not login.
+    #     user - Access to use the bridge with puppeting.
+    #    admin - Full access, user level with some additional administration tools.
+    permissions:
+        "*": relay
+        "example.com": user
+        "@admin:example.com": admin
+
+# Config for the bridge's database
+database:
+    # The database type. "sqlite3-fk-wal" and "postgres" are supported.
+    type: sqlite3-fk-wal
+    # The database URI.
+    #   SQLite: A raw file path is supported, but `file:<path>?_txlock=immediate` is recommended.
+    #   Postgres: Connection string. For example, postgres://user:password@host/database?sslmode=disable
+    uri: file:emaildawg.db?_txlock=immediate
+    # Maximum number of connections.
+    max_open_conns: 5
+    max_idle_conns: 1
+
+# Homeserver details
+homeserver:
+    # The address that this appservice can use to connect to the homeserver.
+    address: http://localhost:8008
+    # The domain of the homeserver (also known as server_name, used for MXIDs, etc).
+    domain: localhost
+    # What software is the homeserver running?
+    software: standard
+
+# Application service host/registration related details
+appservice:
+    # The address that the homeserver can use to connect to this appservice.
+    address: http://localhost:29319
+    # The hostname and port where this appservice should listen.
+    hostname: localhost
+    port: 29319
+    # The user ID of the appservice bot.
+    bot_username: emaildawgbot
+    # Display name and avatar for the bot user.
+    bot_displayname: Email Bridge Bot
+    bot_avatar: mxc://maunium.net/ygtkteZsXnGJLJHRchUwYWak
+    # Whether or not to receive ephemeral events via appservice transactions.
+    ephemeral_events: true
+    
+# Logging config
+logging:
+    min_level: debug
+    writers:
+    - type: stdout
+      format: pretty-colored
+    - type: file
+      format: json
+      filename: /var/log/mautrix-emaildawg.log
+      max_size: 100
+      max_backups: 10
+      compress: true
