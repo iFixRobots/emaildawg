@@ -50,5 +50,6 @@ metadata:
   encryption_support: true
   double_puppeting: false
   relay_mode: false
-  ghost_prefix: "_email_"
+  ghost_prefix: "email_"
   bot_username: emaildawgbot
+  network_id: email
