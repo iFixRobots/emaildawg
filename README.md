@@ -42,7 +42,15 @@ This bridge follows the modern mautrix bridgev2 architecture:
 
 ## Quick Start
 
-### Option 1: Bridge Manager (Ready for Integration!)
+### Option 1: One-Command Setup (Easiest)
+```bash
+git clone https://github.com/iFixRobots/emaildawg
+cd emaildawg
+./setup.sh
+```
+This automatically installs dependencies, builds with encryption, and shows next steps.
+
+### Option 2: Bridge Manager (Ready for Integration!)
 ```bash
 bbctl register emaildawg https://github.com/iFixRobots/emaildawg
 bbctl run emaildawg

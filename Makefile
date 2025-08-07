@@ -3,17 +3,29 @@
 # Detect platform
 UNAME_S := $(shell uname -s)
 
-# Set libolm paths for macOS (Homebrew)
+# Auto-detect libolm paths
 ifeq ($(UNAME_S),Darwin)
-	LIBOLM_PREFIX := $(shell brew --prefix libolm 2>/dev/null || echo "/opt/homebrew/opt/libolm")
-	CGO_CFLAGS := -I$(LIBOLM_PREFIX)/include
-	CGO_LDFLAGS := -L$(LIBOLM_PREFIX)/lib
+	# Try multiple possible locations on macOS
+	LIBOLM_PREFIX := $(shell brew --prefix libolm 2>/dev/null || ([ -d /opt/homebrew/opt/libolm ] && echo "/opt/homebrew/opt/libolm") || ([ -d /usr/local/opt/libolm ] && echo "/usr/local/opt/libolm") || echo "")
+	ifneq ($(LIBOLM_PREFIX),)
+		CGO_CFLAGS := -I$(LIBOLM_PREFIX)/include
+		CGO_LDFLAGS := -L$(LIBOLM_PREFIX)/lib
+	else
+		$(error libolm not found. Please install with: brew install libolm)
+	endif
 endif
 
-# Set libolm paths for Linux (system packages)
 ifeq ($(UNAME_S),Linux)
-	CGO_CFLAGS := -I/usr/include/olm
-	CGO_LDFLAGS := -L/usr/lib
+	# Check for libolm on Linux
+	ifneq ($(wildcard /usr/include/olm/olm.h),)
+		CGO_CFLAGS := -I/usr/include/olm
+		CGO_LDFLAGS := -L/usr/lib
+	else ifneq ($(wildcard /usr/local/include/olm/olm.h),)
+		CGO_CFLAGS := -I/usr/local/include/olm
+		CGO_LDFLAGS := -L/usr/local/lib
+	else
+		$(error libolm not found. Please install libolm-dev package)
+	endif
 endif
 
 # Build targets
