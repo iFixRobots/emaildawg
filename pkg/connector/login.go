@@ -61,22 +61,25 @@ func (elp *EmailLoginProcess) Start(ctx context.Context) (*bridgev2.LoginStep, e
 func (elp *EmailLoginProcess) buildLoginInstructions() string {
 	return `🔐 **Email Bridge Login**
 
-**Quick Setup:**
-• Just enter your email address and password
-• The bridge will automatically detect your email provider settings
-• For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
+**📧 Enter your credentials in this format:**
+` + "`email:your@email.com password:yourpassword`" + `
 
-**Popular Providers Supported:**
-✅ Gmail (gmail.com) - Auto-configured
-✅ Yahoo (yahoo.com) - Auto-configured  
-✅ Outlook/Hotmail (outlook.com, hotmail.com) - Auto-configured
-✅ iCloud (icloud.com) - Auto-configured
-✅ Custom IMAP servers - Auto-detected
+**Example:**
+` + "`email:john@gmail.com password:abcd1234efgh5678`" + `
+
+**Important Notes:**
+• For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
+• The bridge will automatically detect your email provider settings
+• Your password will be encrypted and stored securely
 
 **App Password Setup:**
 📱 **Gmail:** Settings → Security → 2-Step Verification → App passwords
 📱 **Yahoo:** Account Info → Account security → Generate app password
 📱 **Outlook:** Security → Sign-in options → App passwords
+
+**Popular Providers Supported:**
+✅ Gmail, Yahoo, Outlook, iCloud - Auto-configured
+✅ Custom IMAP servers - Auto-detected
 
 *The bridge will test your connection automatically!*`
 }
