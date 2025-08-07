@@ -153,6 +153,10 @@ func (c *Client) Connect() error {
 		return nil
 	}
 
+	// Ensure clean state before connecting
+	c.idling = false
+	c.connected = false
+	
 	c.log.Info().Str("host", c.Host).Int("port", c.Port).Bool("tls", c.TLS).Msg("Connecting to IMAP server")
 
 	// Create network connection
@@ -238,9 +242,33 @@ func (c *Client) StartIDLE() error {
 
 	c.log.Info().Msg("Starting IMAP IDLE monitoring")
 
-	// Select INBOX
+	// Select INBOX - this will reset any stale connection state
 	if _, err := c.client.Select("INBOX", nil).Wait(); err != nil {
+		c.mu.Lock()
+		c.idling = false
+		c.mu.Unlock()
 		return fmt.Errorf("failed to select INBOX: %w", err)
+	}
+
+	// Test IDLE capability before starting the loop
+	// This will fail immediately if server thinks IDLE is already running
+	testIdleCmd, err := c.client.Idle()
+	if err != nil {
+		c.mu.Lock()
+		c.idling = false
+		c.mu.Unlock()
+		
+		// If IDLE is "already running", force a reconnection to reset server state
+		if strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "IDLE already") {
+			c.log.Warn().Err(err).Msg("Server reports IDLE already running - forcing connection reset")
+			return c.resetConnection()
+		}
+		return fmt.Errorf("failed to test IDLE capability: %w", err)
+	}
+	
+	// Immediately close the test IDLE and start the actual monitoring loop
+	if err := testIdleCmd.Close(); err != nil {
+		c.log.Warn().Err(err).Msg("Failed to close test IDLE command")
 	}
 
 	// Start IDLE monitoring in goroutine
@@ -314,6 +342,17 @@ func (c *Client) runIDLE() error {
 	// Create IDLE command
 	idleCmd, err := c.client.Idle()
 	if err != nil {
+		// If IDLE fails due to "already running", this indicates server-side state desync
+		// Force a reconnection to clean up the connection state
+		if strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "IDLE already") {
+			c.log.Warn().Err(err).Msg("IDLE already running on server - forcing reconnection to reset state")
+			// Signal reconnection needed
+			select {
+			case c.reconnect <- struct{}{}:
+			default:
+			}
+			return fmt.Errorf("IDLE state desync detected, reconnection triggered: %w", err)
+		}
 		return fmt.Errorf("failed to start IDLE: %w", err)
 	}
 
@@ -347,54 +386,120 @@ func (c *Client) runIDLE() error {
 
 // checkNewMessages fetches and processes new messages
 func (c *Client) checkNewMessages() error {
-	// Get current mailbox status
-	status, err := c.client.Status("INBOX", &imap.StatusOptions{
-		NumMessages: true,
-		UIDNext:     true,
-	}).Wait()
-	if err != nil {
-		return fmt.Errorf("failed to get mailbox status: %w", err)
-	}
-
-	// Handle potential nil values
-	var numMessages uint32
-	var uidNext imap.UID
-	if status.NumMessages != nil {
-		numMessages = *status.NumMessages
-	}
-	uidNext = status.UIDNext
-
-	c.log.Debug().Uint32("total_messages", numMessages).Uint32("uid_next", uint32(uidNext)).Msg("Mailbox status")
-
-	// If we haven't set lastUID yet, set it to current UIDNext to avoid processing old messages
-	c.mu.Lock()
-	if c.lastUID == 0 {
-		if uidNext > 0 {
-			c.lastUID = uidNext - 1
-		}
-		c.mu.Unlock()
-		c.log.Info().Uint32("last_uid", uint32(c.lastUID)).Msg("Initialized lastUID, will only process new messages")
-		return nil
-	}
+	c.log.Info().Msg("Starting manual sync - checking for new messages")
+	
+	// Get current lastUID safely
+	c.mu.RLock()
 	currentLastUID := c.lastUID
-	c.mu.Unlock()
-
-	// Fetch messages newer than lastUID
-	if uidNext <= currentLastUID+1 {
-		c.log.Debug().Msg("No new messages to process")
+	c.mu.RUnlock()
+	
+	// Use SEARCH command to find new messages without affecting IDLE state
+	c.log.Info().Uint32("from_uid", uint32(currentLastUID+1)).Uint32("current_last_uid", uint32(currentLastUID)).Msg("Searching for new messages")
+	
+	// Create UID set for messages after our last processed UID
+	uidSet := imap.UIDSet{}
+	uidSet.AddRange(currentLastUID+1, 0) // 0 means "to end"
+	
+	// Search for messages with UIDs in this range
+	searchCriteria := imap.SearchCriteria{
+		UID: []imap.UIDSet{uidSet},
+	}
+	
+	// If this is the first sync (lastUID=0), just get current state and mark as up-to-date
+	if currentLastUID == 0 {
+		c.log.Info().Msg("First sync detected (lastUID=0), setting up to only sync NEW messages going forward")
+		// Get the current highest UID to mark as our starting point
+		statusCmd := c.client.Status("INBOX", &imap.StatusOptions{
+			UIDNext: true,
+		})
+		statusData, err := statusCmd.Wait()
+		if err != nil {
+			c.log.Error().Err(err).Msg("Failed to get INBOX status")
+			return fmt.Errorf("failed to get INBOX status: %w", err)
+		}
+		
+		// Set lastUID to current highest UID so we only sync NEW messages from now on
+		currentHighestUID := statusData.UIDNext - 1
+		c.mu.Lock()
+		c.lastUID = currentHighestUID
+		c.mu.Unlock()
+		
+		c.log.Info().Uint32("last_uid", uint32(currentHighestUID)).Msg("First sync complete - bridge is now up-to-date, will only sync NEW messages")
+		return nil // No need to search for existing messages
+	}
+	
+	c.log.Debug().Interface("search_criteria", searchCriteria).Msg("Starting IMAP UID search")
+	
+	// Create search command with timeout handling
+	searchCmd := c.client.UIDSearch(&searchCriteria, nil)
+	var newUIDs []imap.UID
+	
+	// Wait for search results with timeout
+	c.log.Debug().Msg("Waiting for IMAP search results")
+	
+	// Create a timeout channel for the search operation
+	searchDone := make(chan error, 1)
+	go func() {
+		_, err := searchCmd.Wait()
+		searchDone <- err
+	}()
+	
+	// Wait with timeout
+	select {
+	case err := <-searchDone:
+		if err != nil {
+			c.log.Error().Err(err).Msg("Failed to search for new messages")
+			return fmt.Errorf("failed to search for new messages: %w", err)
+		}
+	case <-time.After(30 * time.Second):
+		c.log.Error().Msg("IMAP search timed out after 30 seconds")
+		return fmt.Errorf("IMAP search timed out")
+	}
+	
+	c.log.Debug().Msg("IMAP search completed")
+	
+	// Get search results
+	searchResult, err := searchCmd.Wait()
+	if err != nil {
+		c.log.Error().Err(err).Msg("Failed to get search results")
+		return fmt.Errorf("failed to get search results: %w", err)
+	}
+	
+	// Get the UIDs from search results
+	newUIDs = searchResult.AllUIDs()
+	
+	if len(newUIDs) == 0 {
+		c.log.Info().Msg("No new messages found")
 		return nil
 	}
-
-	c.log.Info().Uint32("from_uid", uint32(currentLastUID+1)).Uint32("to_uid", uint32(uidNext-1)).Msg("Processing new messages")
-
-	// Process new messages
-	c.processNewMessages(currentLastUID+1, uidNext-1)
-
-	// Update lastUID
-	c.mu.Lock()
-	c.lastUID = uidNext - 1
-	c.mu.Unlock()
-
+	
+	c.log.Info().Int("count", len(newUIDs)).Msg("Found new messages")
+	
+	// Process the new messages
+	for _, uid := range newUIDs {
+		if err := c.processMessage(context.Background(), uid); err != nil {
+			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message")
+			// Continue processing other messages even if one fails
+		}
+	}
+	
+	// Update lastUID to the highest UID we processed
+	if len(newUIDs) > 0 {
+		// Find the highest UID
+		highestUID := newUIDs[0]
+		for _, uid := range newUIDs[1:] {
+			if uid > highestUID {
+				highestUID = uid
+			}
+		}
+		
+		c.mu.Lock()
+		c.lastUID = highestUID
+		c.mu.Unlock()
+		c.log.Info().Uint32("new_last_uid", uint32(highestUID)).Msg("Updated lastUID after processing messages")
+	}
+	
+	c.log.Info().Msg("Sync completed successfully")
 	return nil
 }
 
@@ -590,11 +695,105 @@ func (c *Client) IsIDLERunning() bool {
 func (c *Client) CheckNewMessages() error {
 	c.mu.RLock()
 	connected := c.connected
+	idling := c.idling
 	c.mu.RUnlock()
 	
 	if !connected {
 		return fmt.Errorf("IMAP client not connected")
 	}
 	
+	// If IDLE is running, we need to temporarily stop it to run Status command
+	if idling {
+		c.log.Info().Msg("Temporarily stopping IDLE for manual sync")
+		c.StopIDLE()
+		
+		// Wait for IDLE to fully stop with timeout
+		timeout := time.After(2 * time.Second)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-timeout:
+				c.log.Warn().Msg("Timeout waiting for IDLE to stop, proceeding anyway")
+				goto runSync
+			case <-ticker.C:
+				c.mu.RLock()
+				stillIdling := c.idling
+				c.mu.RUnlock()
+				if !stillIdling {
+					c.log.Info().Msg("IDLE fully stopped, proceeding with sync")
+					goto runSync
+				}
+			}
+		}
+		
+		runSync:
+		// Run the sync
+		err := c.checkNewMessages()
+		
+		// Restart IDLE
+		c.log.Info().Msg("Restarting IDLE after manual sync")
+		if restartErr := c.StartIDLE(); restartErr != nil {
+			c.log.Error().Err(restartErr).Msg("Failed to restart IDLE after sync")
+			// Return the original sync error if sync failed, otherwise the restart error
+			if err != nil {
+				return err
+			}
+			return restartErr
+		}
+		
+		return err
+	}
+	
+	// IDLE not running, safe to check messages directly
 	return c.checkNewMessages()
+}
+
+// TestConnection tests if the IMAP connection is healthy by sending a NOOP command
+func (c *Client) TestConnection() error {
+	c.mu.RLock()
+	connected := c.connected
+	client := c.client
+	c.mu.RUnlock()
+	
+	if !connected || client == nil {
+		return fmt.Errorf("IMAP client not connected")
+	}
+	
+	// Send NOOP command to test connection health
+	// This will fail if the connection is stale or if there are server-side issues
+	noopCmd := client.Noop()
+	if err := noopCmd.Wait(); err != nil {
+		return fmt.Errorf("NOOP command failed: %w", err)
+	}
+	
+	c.log.Debug().Msg("Connection test successful (NOOP command completed)")
+	return nil
+}
+
+// resetConnection forces a complete disconnection and reconnection to clear server-side state
+func (c *Client) resetConnection() error {
+	c.log.Info().Msg("Resetting IMAP connection to clear server-side IDLE state")
+	
+	// Force disconnect without proper logout (since server state is already confused)
+	c.mu.Lock()
+	if c.client != nil {
+		c.client.Close() // Force close TCP connection
+		c.client = nil
+	}
+	c.connected = false
+	c.idling = false
+	c.mu.Unlock()
+	
+	// Wait a moment for server-side cleanup
+	time.Sleep(2 * time.Second)
+	
+	// Establish fresh connection
+	if err := c.Connect(); err != nil {
+		return fmt.Errorf("failed to reconnect after reset: %w", err)
+	}
+	
+	// Try IDLE again on the fresh connection
+	return c.StartIDLE()
 }

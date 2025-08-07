@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,6 +129,19 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		emailClient.IMAPClient.SetProcessor(ec.Processor)
 	}
 	
+	// Automatically connect the client after loading
+	go emailClient.Connect(ctx)
+	
+	// Register client with IMAP manager for status reporting
+	go func() {
+		// Wait a moment for connection to establish
+		time.Sleep(2 * time.Second)
+		if emailClient.IsConnected() {
+			// Register the connected client with the manager for status reporting
+			ec.IMAPManager.RegisterClient(login.UserMXID.String(), emailClient.Email, emailClient.IMAPClient)
+		}
+	}()
+	
 	return nil
 }
 
@@ -157,10 +171,20 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 	
 	ec.isConnected.Store(true)
 	
-	// Start IMAP IDLE monitoring
-	if err := ec.IMAPClient.StartIDLE(); err != nil {
-		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE")
-		// Don't fail completely, just log the error
+	// Start IMAP IDLE monitoring with retry logic
+	if err := ec.startIDLEWithRetry(); err != nil {
+		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE after retries")
+		// Set bridge state to indicate IDLE failure
+		state := status.BridgeState{
+			StateEvent: status.StateUnknownError,
+			Error:      EmailConnectionFailed,
+			Info: map[string]any{
+				"go_error": err.Error(),
+				"error_type": "IDLE_startup_failed",
+			},
+		}
+		ec.UserLogin.BridgeState.Send(state)
+		// Continue without IDLE - bridge can still do periodic sync
 	}
 	
 	// Start background loops
@@ -251,6 +275,66 @@ func (ec *EmailClient) Stop(ctx context.Context) {
 	}
 	
 	ec.UserLogin.Log.Info().Msg("Email client stopped")
+}
+
+// startIDLEWithRetry attempts to start IDLE with connection reset if needed
+func (ec *EmailClient) startIDLEWithRetry() error {
+	// First, test connection health with a NOOP command
+	if err := ec.IMAPClient.TestConnection(); err != nil {
+		ec.UserLogin.Log.Warn().Err(err).Msg("Connection test failed, forcing reconnection")
+		if err := ec.reconnectIMAPClient(); err != nil {
+			return fmt.Errorf("failed to reconnect after connection test failure: %w", err)
+		}
+	}
+	
+	// Try to start IDLE
+	if err := ec.IMAPClient.StartIDLE(); err != nil {
+		// Check if it's the "IDLE already running" error
+		if strings.Contains(err.Error(), "IDLE already") || strings.Contains(err.Error(), "already running") {
+			ec.UserLogin.Log.Warn().Err(err).Msg("Server reports IDLE already running - forcing connection reset")
+			
+			// Force reconnection to clear server-side state
+			if err := ec.reconnectIMAPClient(); err != nil {
+				return fmt.Errorf("failed to reconnect after IDLE conflict: %w", err)
+			}
+			
+			// Try IDLE again on fresh connection
+			if err := ec.IMAPClient.StartIDLE(); err != nil {
+				return fmt.Errorf("IDLE failed even after connection reset: %w", err)
+			}
+			
+			ec.UserLogin.Log.Info().Msg("Successfully started IDLE after connection reset")
+			return nil
+		}
+		
+		// Other IDLE error - don't retry
+		return fmt.Errorf("IDLE startup failed: %w", err)
+	}
+	
+	ec.UserLogin.Log.Info().Msg("IDLE started successfully")
+	return nil
+}
+
+// reconnectIMAPClient performs a full disconnect and reconnect
+func (ec *EmailClient) reconnectIMAPClient() error {
+	ec.UserLogin.Log.Info().Msg("Reconnecting IMAP client to clear server-side state")
+	
+	// Stop IDLE first if it's running
+	if ec.IMAPClient != nil {
+		ec.IMAPClient.StopIDLE()
+		ec.IMAPClient.Disconnect()
+	}
+	
+	// Wait for server-side cleanup
+	time.Sleep(2 * time.Second)
+	
+	// Reconnect
+	if err := ec.IMAPClient.Connect(); err != nil {
+		return fmt.Errorf("failed to reconnect IMAP: %w", err)
+	}
+	
+	ec.UserLogin.Log.Info().Msg("IMAP reconnection successful")
+	return nil
 }
 
 func (ec *EmailClient) startLoops() {

@@ -178,6 +178,19 @@ func (m *Manager) StopAll() {
 	m.log.Info().Msg("Stopped all IMAP clients")
 }
 
+// RegisterClient registers an existing IMAP client with the manager for status reporting
+func (m *Manager) RegisterClient(userMXID, email string, client *Client) {
+	clientKey := m.getClientKey(userMXID, email)
+	
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// Store the client for status reporting
+	m.clients[clientKey] = client
+	
+	m.log.Debug().Str("user", userMXID).Str("email", email).Msg("Registered IMAP client for status reporting")
+}
+
 // getClientKey generates a unique key for storing clients
 func (m *Manager) getClientKey(userMXID, email string) string {
 	return fmt.Sprintf("%s:%s", userMXID, email)
