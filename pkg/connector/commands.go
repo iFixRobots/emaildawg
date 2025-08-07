@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"strings"
 
+	"go.mau.fi/mautrix-emaildawg/pkg/imap"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
-	"go.mau.fi/mautrix-emaildawg/pkg/imap"
 )
 
 var (
-	HelpSectionAuth = commands.HelpSection{Name: "Authentication", Order: 10}
-	HelpSectionInfo = commands.HelpSection{Name: "Information", Order: 5}
+	HelpSectionAuth  = commands.HelpSection{Name: "Authentication", Order: 10}
+	HelpSectionInfo  = commands.HelpSection{Name: "Information", Order: 5}
 	HelpSectionAdmin = commands.HelpSection{Name: "Administration", Order: 15}
 
 	CommandPing = &commands.FullHandler{
@@ -93,7 +93,7 @@ func fnPing(ce *commands.Event) {
 
 func fnStatus(ce *commands.Event) {
 	logins := ce.User.GetUserLogins()
-	
+
 	if len(logins) == 0 {
 		ce.Reply(`
 📊 **EmailDawg Bridge Status**
@@ -114,7 +114,7 @@ func fnStatus(ce *commands.Event) {
 	}
 
 	accountStatuses := ConnectorInstance.IMAPManager.GetAccountStatus(ce.User.MXID.String())
-	
+
 	if len(accountStatuses) == 0 {
 		ce.Reply(`
 📊 **EmailDawg Bridge Status**
@@ -186,16 +186,16 @@ func fnLogin(ce *commands.Event) {
 	if len(ce.Args) < 2 {
 		ce.Reply(`🔐 **Email Bridge Login**
 
-**Usage:** ` + "`!email login <email> <password>`" + `
+**Usage:** !email login <email> <password>
 
-**Example:** ` + "`!email login john@gmail.com "myapp password123"`" + `
+**Example:** !email login john@gmail.com "myapp password123"
 
-**For App Passwords with spaces, use quotes:**
-` + "`!email login user@gmail.com "qdhw aaxw oosd zpxz"`" + `
+**For App Passwords with spaces:**
+!email login user@gmail.com "qdhw aaxw oosd zpxz"
 
 **Important Notes:**
 • For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
-• App Passwords have spaces - put them in quotes!
+• App Passwords have spaces - you can use quotes for clarity
 • The bridge will automatically detect your email provider settings
 • Your password will be encrypted and stored securely
 
@@ -228,7 +228,7 @@ func fnLogin(ce *commands.Event) {
 	}
 
 	ce.Reply("📧 Connecting to **%s**...", email)
-	
+
 	// Create login process manually
 	ctx := context.Background()
 	loginProcess := &EmailLoginProcess{
@@ -237,7 +237,7 @@ func fnLogin(ce *commands.Event) {
 		username: email,
 		password: password,
 	}
-	
+
 	// Submit the credentials directly
 	step, err := loginProcess.SubmitUserInput(ctx, map[string]string{
 		"email":    email,
@@ -247,7 +247,7 @@ func fnLogin(ce *commands.Event) {
 		ce.Reply("❌ **Login Failed:** %s", err.Error())
 		return
 	}
-	
+
 	if step.Type == bridgev2.LoginStepTypeComplete {
 		ce.Reply("✅ **Successfully connected to %s!**\n\n📬 New emails will now appear as Matrix rooms. The bridge is monitoring your inbox in real-time.", email)
 	} else {
@@ -267,7 +267,7 @@ func fnLogout(ce *commands.Event) {
 	if len(ce.Args) > 0 {
 		emailAddr := ce.Args[0]
 		ce.Reply("🔌 Disconnecting from **%s**...", emailAddr)
-		
+
 		// Find the specific login for this email
 		var targetLogin *bridgev2.UserLogin
 		for _, login := range logins {
@@ -276,12 +276,12 @@ func fnLogout(ce *commands.Event) {
 				break
 			}
 		}
-		
+
 		if targetLogin == nil {
 			ce.Reply("❌ Email account **%s** not found in your connected accounts.", emailAddr)
 			return
 		}
-		
+
 		// Use LogoutRemote for proper cleanup
 		ctx := context.Background()
 		if client, ok := targetLogin.Client.(*EmailClient); ok {
@@ -295,17 +295,17 @@ func fnLogout(ce *commands.Event) {
 
 	// Logout all accounts
 	ce.Reply("🔌 Disconnecting from all %d email account(s)...", len(logins))
-	
+
 	// Use LogoutRemote for each login for proper cleanup
 	ctx := context.Background()
 	var failures []string
-	
+
 	for _, login := range logins {
 		if client, ok := login.Client.(*EmailClient); ok {
 			try := func() {
 				client.LogoutRemote(ctx)
 			}
-			
+
 			// Use a simple panic recovery to catch any logout failures
 			func() {
 				defer func() {
@@ -319,7 +319,7 @@ func fnLogout(ce *commands.Event) {
 			failures = append(failures, fmt.Sprintf("Invalid client type for login %s", login.ID))
 		}
 	}
-	
+
 	if len(failures) == 0 {
 		ce.Reply("✅ Successfully disconnected from all email accounts.")
 	} else {
@@ -351,29 +351,29 @@ Need help? Use ` + "`!email help`" + ` for more information.
 		ce.Reply("❌ Failed to get account list: %s", err.Error())
 		return
 	}
-	
+
 	if len(accounts) == 0 {
 		ce.Reply("📭 No email accounts found in database. Use `!email login` to add one.")
 		return
 	}
-	
+
 	// Get account status from IMAP manager
 	statusMap := make(map[string]imap.AccountStatus)
 	statuses := ConnectorInstance.IMAPManager.GetAccountStatus(ce.User.MXID.String())
 	for _, status := range statuses {
 		statusMap[status.Email] = status
 	}
-	
+
 	// Build response
 	response := fmt.Sprintf("📧 **Connected Email Accounts:** %d\n\n", len(accounts))
-	
+
 	for _, account := range accounts {
 		status, hasStatus := statusMap[account.Email]
-		
+
 		var statusIcon string
 		var statusText string
 		var provider string
-		
+
 		// Determine provider name
 		domain := strings.ToLower(strings.Split(account.Email, "@")[1])
 		if p, ok := imap.CommonProviders[domain]; ok {
@@ -381,7 +381,7 @@ Need help? Use ` + "`!email help`" + ` for more information.
 		} else {
 			provider = "Custom IMAP"
 		}
-		
+
 		if hasStatus {
 			if status.Connected && status.IDLEActive {
 				statusIcon = "✅"
@@ -397,14 +397,14 @@ Need help? Use ` + "`!email help`" + ` for more information.
 			statusIcon = "⚠️"
 			statusText = "Status unknown"
 		}
-		
+
 		response += fmt.Sprintf("• %s **%s** (%s) - %s\n", statusIcon, account.Email, provider, statusText)
 		if hasStatus && status.Host != "" {
 			response += fmt.Sprintf("   📡 %s:%d\n", status.Host, status.Port)
 		}
 		response += fmt.Sprintf("   🕒 Added: %s\n\n", account.CreatedAt.Format("Jan 2, 2006"))
 	}
-	
+
 	response += "💡 Use `!email logout <email>` to remove a specific account."
 	ce.Reply(response)
 }
