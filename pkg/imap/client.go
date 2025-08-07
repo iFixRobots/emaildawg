@@ -732,15 +732,13 @@ func (c *Client) CheckNewMessages() error {
 		// Run the sync
 		err := c.checkNewMessages()
 		
-		// Restart IDLE
+		// Restart IDLE with retry logic (same as startup)
 		c.log.Info().Msg("Restarting IDLE after manual sync")
-		if restartErr := c.StartIDLE(); restartErr != nil {
+		if restartErr := c.safeStartIDLE(); restartErr != nil {
 			c.log.Error().Err(restartErr).Msg("Failed to restart IDLE after sync")
-			// Return the original sync error if sync failed, otherwise the restart error
-			if err != nil {
-				return err
-			}
-			return restartErr
+			// Don't fail the sync command due to IDLE restart issues
+			// The sync itself was successful, IDLE can be retried by the background loops
+			c.log.Warn().Msg("Sync completed successfully, but IDLE restart failed - periodic sync will continue")
 		}
 		
 		return err
@@ -770,6 +768,50 @@ func (c *Client) TestConnection() error {
 	
 	c.log.Debug().Msg("Connection test successful (NOOP command completed)")
 	return nil
+}
+
+// safeStartIDLE attempts to start IDLE with timeout and recovery logic
+func (c *Client) safeStartIDLE() error {
+	// Use a timeout channel to prevent hanging
+	done := make(chan error, 1)
+	go func() {
+		// Try to start IDLE with connection reset capability
+		if err := c.TestConnection(); err != nil {
+			c.log.Warn().Err(err).Msg("Connection test failed during IDLE restart")
+			// Try reconnecting
+			if reconErr := c.Connect(); reconErr != nil {
+				done <- fmt.Errorf("failed to reconnect for IDLE restart: %w", reconErr)
+				return
+			}
+		}
+		
+		// Try starting IDLE
+		if err := c.StartIDLE(); err != nil {
+			// Check for the "already running" issue
+			if strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "IDLE already") {
+				c.log.Warn().Err(err).Msg("IDLE already running during restart - attempting connection reset")
+				// Try connection reset
+				if resetErr := c.resetConnection(); resetErr != nil {
+					done <- fmt.Errorf("failed to reset connection for IDLE restart: %w", resetErr)
+					return
+				}
+				done <- nil // Success after reset
+				return
+			}
+			done <- fmt.Errorf("failed to start IDLE: %w", err)
+			return
+		}
+		done <- nil // Success
+	}()
+	
+	// Wait with timeout
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		c.log.Error().Msg("IDLE restart timed out after 10 seconds")
+		return fmt.Errorf("IDLE restart timed out")
+	}
 }
 
 // resetConnection forces a complete disconnection and reconnection to clear server-side state
