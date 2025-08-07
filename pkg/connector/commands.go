@@ -189,30 +189,25 @@ func fnLogin(ce *commands.Event) {
 		return
 	}
 
-	// Start the interactive login process
+	// Start the actual bridgev2 login flow
 	ce.Reply("📧 Starting email login process...")
 	
-	// Trigger the bridgev2 login flow
-	// The user will be guided through the login process via the bridge bot
-	ce.Reply(`✨ **EmailDawg Login**
-
-🔐 Use the bridge manager to start the login process:
-` + "`!login`" + `
-
-The bridge will guide you through:
-1. 📧 **Email Address** - Enter your email (e.g., user@gmail.com)
-2. 👤 **Username** - Usually same as email (for most providers)
-3. 🔒 **Password** - Your email password or app password
-4. 🧪 **Connection Test** - Bridge will test the IMAP connection
-5. ✅ **Success** - Real-time email monitoring will begin!
-
-💡 **Important Notes:**
-• **Gmail**: Requires App Password (not regular password)
-• **Yahoo**: Requires App Password for IMAP access
-• **Outlook**: May require App Password if 2FA enabled
-• **Custom domains**: May need separate username
-
-Once connected, all your email threads will appear as Matrix rooms! 🎉`)
+	ctx := context.Background()
+	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
+	if err != nil {
+		ce.Reply("❌ Failed to start login process: %s", err.Error())
+		return
+	}
+	
+	// Start the login process and get the first step
+	step, err := loginProcess.Start(ctx)
+	if err != nil {
+		ce.Reply("❌ Failed to initialize login: %s", err.Error())
+		return
+	}
+	
+	// Send the login instructions from the actual login process
+	ce.Reply(step.Instructions)
 }
 
 func fnLogout(ce *commands.Event) {
