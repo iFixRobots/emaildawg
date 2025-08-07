@@ -32,7 +32,7 @@ var (
 
 func (ec *EmailConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
-		DisplayName:          "Email",
+		DisplayName:          "EmailDawg",
 		NetworkURL:           "https://en.wikipedia.org/wiki/Email",
 		NetworkIcon:          "mxc://maunium.net/YgtkucQxWlKJxwMBJR6Ggz5w", // Email icon
 		NetworkID:            "email",
