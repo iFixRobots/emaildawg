@@ -1,4 +1,4 @@
-module go.mau.fi/mautrix-emaildawg
+module github.com/iFixRobots/emaildawg
 
 go 1.24.5
 

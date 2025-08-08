@@ -13,8 +13,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/email"
-	"go.mau.fi/mautrix-emaildawg/pkg/imap"
+	"github.com/iFixRobots/emaildawg/pkg/email"
+	"github.com/iFixRobots/emaildawg/pkg/imap"
 )
 
 // EmailClient implements bridgev2.NetworkAPI for email accounts

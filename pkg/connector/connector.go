@@ -14,9 +14,9 @@ import (
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"go.mau.fi/mautrix-emaildawg/pkg/imap"
-	"go.mau.fi/mautrix-emaildawg/pkg/matrix"
-	"go.mau.fi/mautrix-emaildawg/pkg/email"
+	"github.com/iFixRobots/emaildawg/pkg/imap"
+	"github.com/iFixRobots/emaildawg/pkg/matrix"
+	"github.com/iFixRobots/emaildawg/pkg/email"
 	"maunium.net/go/mautrix/event"
 )
 

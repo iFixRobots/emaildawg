@@ -12,7 +12,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/email"
+	"github.com/iFixRobots/emaildawg/pkg/email"
 )
 
 // RoomManager handles Matrix room creation and management for email threads

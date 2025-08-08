@@ -4,7 +4,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/connector"
+	"github.com/iFixRobots/emaildawg/pkg/connector"
 )
 
 // Information to find out exactly which commit the bridge was built from.

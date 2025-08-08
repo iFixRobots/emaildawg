@@ -15,8 +15,8 @@ import (
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/email"
-	logging "go.mau.fi/mautrix-emaildawg/pkg/logging"
+	"github.com/iFixRobots/emaildawg/pkg/email"
+	logging "github.com/iFixRobots/emaildawg/pkg/logging"
 )
 
 // IMAPDebugWriter captures all IMAP protocol traffic for debugging

@@ -10,7 +10,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/imap"
+	"github.com/iFixRobots/emaildawg/pkg/imap"
 )
 
 // EmailLoginProcess represents the email login flow

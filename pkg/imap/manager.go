@@ -8,7 +8,7 @@ import (
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/email"
+	"github.com/iFixRobots/emaildawg/pkg/email"
 )
 
 // Manager handles multiple IMAP clients for different email accounts

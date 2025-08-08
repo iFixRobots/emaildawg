@@ -25,7 +25,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
-	logging "go.mau.fi/mautrix-emaildawg/pkg/logging"
+	logging "github.com/iFixRobots/emaildawg/pkg/logging"
 )
 
 // Processor handles the complete email processing pipeline

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"go.mau.fi/mautrix-emaildawg/pkg/imap"
+	"github.com/iFixRobots/emaildawg/pkg/imap"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 )
