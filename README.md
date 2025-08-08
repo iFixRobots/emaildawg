@@ -1,62 +1,43 @@
 # mautrix-emaildawg
 
-A Matrix-Email puppeting bridge based on the mautrix bridgev2 framework.
+A Matrix–Email bridge built on mautrix bridgev2. Focused on reliable email consumption in Matrix rooms (not chat features).
 
 ## Status
 
-✅ **Production Ready:**
-- Email login with auto-provider detection
-- IMAP message processing with attachments
-- Email threading and participant management
-- Matrix room creation with proper permissions
-- Smart participant change notifications
-- Bridge manager integration complete
-- Docker deployment ready
-- Full CLI interface implemented
+This project is usable and under active development. Core features work and the bridge is suitable for personal use and small deployments.
 
 ## Features
 
-### ✅ Core Features
-- **Advanced Login Flow** - Super easy email setup with provider detection
-- **Attachment Support** - Full email attachment handling (images, files, etc.)
-- **Smart Threading** - Proper email thread → Matrix room mapping
-- **Participant Management** - CC/BCC users become Matrix ghosts with join/leave notifications
-- **Provider Auto-Detection** - Gmail, Yahoo, Outlook, iCloud support with App Password guidance
-- **Read-Only Matrix Rooms** - Only bridge can send messages, users see email content
-- **IMAP IDLE** - Real-time email delivery
-- **Registration Generation** - Automated via CLI commands
-- **Bridge Management** - Full CLI interface with all standard commands
-- **Docker Support** - Ready-to-deploy containers
+- Email login with provider auto-detection
+- IMAP processing with attachments
+- Email threading and participant mapping
+- Matrix room creation with read-only policy for users
+- Participant change notices (join/leave based on headers)
+- Docker and Bridge Manager support
 
 ## Architecture
 
-This bridge follows the modern mautrix bridgev2 architecture:
+- Implemented in Go using the mautrix bridgev2 framework
+- One email thread maps to one Matrix room
+- Participants (To/CC/BCC) are represented as Matrix ghost users
+- Attachments are uploaded to the homeserver media repo
 
-- **Built in Go** using the mautrix bridgev2 framework
-- **Compatible with bridge manager** for easy deployment on Beeper
-- **Uses IMAP IDLE** for real-time email delivery
-- **One email thread = one Matrix room**
-- **Email participants become Matrix room ghosts**
-- **Comprehensive attachment handling**
-- **Smart participant change tracking**
+## Quick start
 
-## Quick Start
-
-### Option 1: One-Command Setup (Easiest)
+### One-command setup
 ```bash
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
 ./setup.sh
 ```
-This automatically installs dependencies, builds with encryption, and shows next steps.
 
-### Option 2: Bridge Manager (Ready for Integration!)
+### Bridge Manager
 ```bash
 bbctl register sh-emaildawg https://github.com/iFixRobots/emaildawg
 bbctl run sh-emaildawg
 ```
 
-### Option 2: Docker Compose (Fully Working)
+### Docker Compose
 ```bash
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
@@ -68,35 +49,34 @@ mkdir -p ./data
 docker-compose up -d
 ```
 
-### Option 3: Manual Build (Tested)
+### Manual build
 
-#### Prerequisites
+Prerequisites:
 - Go 1.21+
-- **libolm** (for end-to-end encryption support)
-- Matrix homeserver with admin access
+- libolm (for end-to-end encryption)
+- Matrix homeserver access
 
-#### Install libolm
-**macOS (Homebrew):**
+Install libolm on macOS (Homebrew):
 ```bash
 brew install libolm
 ```
 
-**Linux (Ubuntu/Debian):**
+On Ubuntu/Debian:
 ```bash
 sudo apt install libolm-dev build-essential
 ```
 
-**Linux (Fedora):**
+On Fedora:
 ```bash
 sudo dnf install libolm-devel gcc
 ```
 
-**Linux (Arch):**
+On Arch:
 ```bash
 sudo pacman -S libolm base-devel
 ```
 
-#### Build & Setup
+Build and run:
 ```bash
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
@@ -110,48 +90,43 @@ make build
 
 ## Configuration
 
-### Initial Setup
-1. **Generate configuration:** `./mautrix-emaildawg --generate-example-config`
-2. **Edit homeserver settings** in config.yaml
-3. **Generate registration:** `./mautrix-emaildawg --generate-registration`
-4. **Register with Matrix homeserver** (add registration.yaml to homeserver config)
-5. **Start bridge**
+Initial setup:
+1. Generate configuration: `./mautrix-emaildawg --generate-example-config`
+2. Edit homeserver settings in config.yaml
+3. Generate registration: `./mautrix-emaildawg --generate-registration`
+4. Register with your homeserver (add registration.yaml to the homeserver config)
+5. Start the bridge
 
-### User Commands
-After bridge is running, users can DM the bridge bot:
+User commands (send in DM to the bot):
+- `!email login` — Add an email account (guided)
+- `!email list` — List configured accounts
+- `!email logout` — Remove an account
+- `!email status` — Show connection status
+- `!email ping` — Health check
 
-- `!email login` - Add an email account (guided setup)
-- `!email list` - List configured accounts  
-- `!email logout` - Remove email accounts
-- `!email status` - Show connection status
-- `!email ping` - Test bridge connection
+## Email provider support
 
-## Email Provider Support
+Auto-configured providers:
+- Gmail (app password)
+- Yahoo (app password)
+- Outlook/Hotmail (app password)
+- iCloud (app password)
+- Custom IMAP (auto-detected settings)
 
-### ✅ Auto-Configured Providers
-- **Gmail** (gmail.com) - App Password required
-- **Yahoo** (yahoo.com) - App Password required  
-- **Outlook/Hotmail** (outlook.com, hotmail.com) - App Password required
-- **iCloud** (icloud.com, me.com) - App Password required
-- **Custom IMAP** - Auto-detected settings
-
-### App Password Setup
-The bridge provides automatic guidance for setting up App Passwords:
-- **Gmail:** Settings → Security → 2-Step Verification → App passwords
-- **Yahoo:** Account Info → Account security → Generate app password
-- **Outlook:** Security → Sign-in options → App passwords
+App password setup guidance is provided during login.
 
 ## How it works
 
-1. **Email threads** → Matrix rooms (1:1 mapping)
-2. **Real-time delivery** via IMAP IDLE  
-3. **Participants** synced from To/CC/BCC headers
-4. **Threading** uses Message-ID/References/In-Reply-To
-5. **Rooms are read-only** for Matrix users (bridge-only messaging)
-6. **Attachments** uploaded to Matrix media repository
-7. **Participant changes** show as timeline notifications
-8. **Smart error handling** with provider-specific troubleshooting
+1. Threads map to rooms.
+2. Real-time delivery via IMAP IDLE.
+3. Participants come from To/CC/BCC.
+4. Threading uses Message-ID, References, and In-Reply-To.
+5. Rooms are read-only for users (bridge posts messages).
+6. Attachments are uploaded to Matrix media.
+7. Participant changes are posted as notices.
 
 ## License
 
-AGPL-3.0
+AGPL-3.0-or-later. See LICENSE.
+
+Portions derived from mautrix-whatsapp (AGPL-3.0-or-later) by Tulir Asokan and contributors.
