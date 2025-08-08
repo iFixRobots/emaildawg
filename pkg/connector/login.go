@@ -210,7 +210,7 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 		Logger()
 
 	// Create test IMAP client without UserLogin (just for testing connection)
-	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &logger)
+client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &logger, ConnectorInstance.Config.Logging.Sanitized, ConnectorInstance.Config.Logging.PseudonymSecret)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}

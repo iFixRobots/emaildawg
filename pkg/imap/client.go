@@ -15,11 +15,14 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 
 	"go.mau.fi/mautrix-emaildawg/pkg/email"
+	logging "go.mau.fi/mautrix-emaildawg/pkg/logging"
 )
 
 // IMAPDebugWriter captures all IMAP protocol traffic for debugging
 type IMAPDebugWriter struct {
-	logger *zerolog.Logger
+	logger    *zerolog.Logger
+	sanitized bool
+	secret    string
 }
 
 // Write implements io.Writer to log IMAP protocol messages
@@ -30,7 +33,12 @@ func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 	if strings.Contains(strings.ToUpper(data), "LOGIN") {
 		w.logger.Trace().Str("imap_data", "[LOGIN COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
 	} else {
-		w.logger.Trace().Str("imap_data", strings.TrimSpace(data)).Msg("[IMAP PROTOCOL] Data exchange")
+		if w.sanitized {
+			// Summarize instead of dumping raw protocol contents
+			w.logger.Trace().Str("imap_data", logging.SummarizeIMAPData(strings.TrimSpace(data))).Msg("[IMAP PROTOCOL] Data exchange")
+		} else {
+			w.logger.Trace().Str("imap_data", strings.TrimSpace(data)).Msg("[IMAP PROTOCOL] Data exchange")
+		}
 	}
 	
 	return len(p), nil
@@ -45,6 +53,10 @@ type Client struct {
 	Username string
 	Password string
 	TLS      bool
+
+	// Logging/sanitization
+	sanitized bool
+	secret    string
 
 	// IMAP client
 	client     *imapclient.Client
@@ -124,7 +136,7 @@ var CommonProviders = map[string]EmailProvider{
 }
 
 // NewClient creates a new IMAP client for the given email account
-func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger) (*Client, error) {
+func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string) (*Client, error) {
 	// Auto-detect provider settings
 	domain := strings.ToLower(strings.Split(email, "@")[1])
 	provider, ok := CommonProviders[domain]
@@ -159,6 +171,8 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		TLS:          useTLS,
 		login:        login,
 		log:          log,
+		sanitized:    sanitized,
+		secret:       secret,
 		stopIdle:     make(chan struct{}),
 		reconnect:    make(chan struct{}),
 		// Circuit breaker settings
@@ -214,7 +228,7 @@ func (c *Client) Connect() error {
 	}
 
 	// Create IMAP client with debug logging enabled
-	debugWriter := &IMAPDebugWriter{logger: c.log}
+	debugWriter := &IMAPDebugWriter{logger: c.log, sanitized: c.sanitized, secret: c.secret}
 	c.client = imapclient.New(conn, &imapclient.Options{
 		DebugWriter: debugWriter, // Enable full IMAP protocol debugging
 	})
@@ -250,8 +264,22 @@ func (c *Client) Disconnect() error {
 
 	// Close connection
 	if c.client != nil {
-		if err := c.client.Logout().Wait(); err != nil {
-			c.log.Warn().Err(err).Msg("Error during IMAP logout")
+		// Attempt graceful logout with timeout; force-close on timeout
+		done := make(chan error, 1)
+		go func() {
+			if err := c.client.Logout().Wait(); err != nil {
+				done <- err
+				return
+			}
+			done <- nil
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				c.log.Warn().Err(err).Msg("Error during IMAP logout")
+			}
+		case <-time.After(2 * time.Second):
+			c.log.Warn().Msg("IMAP logout timed out, force closing connection")
 		}
 		c.client.Close()
 		c.client = nil
@@ -731,9 +759,20 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID) error {
 
 		// Queue the event with the bridge framework
 		if !c.login.QueueRemoteEvent(matrixEvent).Success {
-			c.log.Error().Str("message_id", string(emailMessage.MessageID)).Msg("Failed to queue remote event")
+			if c.sanitized {
+				c.log.Error().Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).Msg("Failed to queue remote event")
+			} else {
+				c.log.Error().Str("message_id", string(emailMessage.MessageID)).Msg("Failed to queue remote event")
+			}
 		} else {
-			c.log.Info().Str("message_id", string(emailMessage.MessageID)).Str("subject", emailMessage.Subject).Msg("Successfully queued email message")
+			if c.sanitized {
+				c.log.Info().
+					Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).
+					Str("subject_hash", logging.HashHMAC(emailMessage.Subject, c.secret, 10)).
+					Msg("Successfully queued email message")
+			} else {
+				c.log.Info().Str("message_id", string(emailMessage.MessageID)).Str("subject", emailMessage.Subject).Msg("Successfully queued email message")
+			}
 		}
 	}
 

@@ -15,6 +15,10 @@ type Manager struct {
 	bridge    bridgev2.Bridge
 	log       *zerolog.Logger
 	processor *email.Processor
+
+	// Sanitization
+	sanitized bool
+	secret    string
 	
 	// Map of userID+email -> IMAP client
 	clients map[string]*Client
@@ -22,10 +26,12 @@ type Manager struct {
 }
 
 // NewManager creates a new IMAP manager
-func NewManager(bridge *bridgev2.Bridge, log *zerolog.Logger) *Manager {
+func NewManager(bridge *bridgev2.Bridge, log *zerolog.Logger, sanitized bool, secret string) *Manager {
 	return &Manager{
 		bridge:   *bridge,
 		log:     log,
+		sanitized: sanitized,
+		secret:   secret,
 		clients: make(map[string]*Client),
 	}
 }
@@ -59,7 +65,7 @@ func (m *Manager) AddAccount(login *bridgev2.UserLogin, email, username, passwor
 	logger := m.log.With().
 		Str("user", login.UserMXID.String()).
 		Str("email", email).Logger()
-	client, err := NewClient(email, username, password, login, &logger)
+	client, err := NewClient(email, username, password, login, &logger, m.sanitized, m.secret)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
@@ -164,16 +170,20 @@ func (m *Manager) GetAccountStatus(userMXID string) []AccountStatus {
 
 // StopAll stops monitoring for all accounts
 func (m *Manager) StopAll() {
+	// Copy clients under lock, then stop outside lock to avoid blocking other operations
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	
-	for _, client := range m.clients {
-		client.StopIDLE()
-		client.Disconnect()
+	clients := make([]*Client, 0, len(m.clients))
+	for _, c := range m.clients {
+		clients = append(clients, c)
 	}
-	
-	// Clear all clients
+	// Clear immediately so new operations see empty set
 	m.clients = make(map[string]*Client)
+	m.mu.Unlock()
+	
+	for _, client := range clients {
+		client.StopIDLE()
+		_ = client.Disconnect()
+	}
 	
 	m.log.Info().Msg("Stopped all IMAP clients")
 }

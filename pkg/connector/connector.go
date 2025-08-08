@@ -51,6 +51,10 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		IMAP: IMAPConfig{
 			DefaultTimeout: 30,
 		},
+		Logging: LoggingConfig{
+			Sanitized:       true,
+			PseudonymSecret: "",
+		},
 	}
 	
 	// Set global instance for command access
@@ -69,7 +73,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Initialize managers
 	logger := bridge.Log.With().Str("component", "imap").Logger()
-	ec.IMAPManager = imap.NewManager(bridge, &logger)
+	ec.IMAPManager = imap.NewManager(bridge, &logger, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
 	
 	roomLogger := bridge.Log.With().Str("component", "matrix").Logger()
 	ec.RoomManager = matrix.NewRoomManager(&roomLogger)
@@ -78,7 +82,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Initialize email processor and wire it to the IMAP manager
 	processorLogger := bridge.Log.With().Str("component", "email_processor").Logger()
-	ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager)
+	ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
 	ec.IMAPManager.SetProcessor(ec.Processor)
 	
 	// Add commands

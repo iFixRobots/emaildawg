@@ -74,6 +74,13 @@ appservice:
     
 # Logging config
 logging:
+    # Existing bridge logging options are handled by the framework.
+    # These additional fields control bridge-level PII redaction in this connector.
+    sanitized: true             # When true, redact PII (subjects, message-ids, emails, raw protocol)
+    pseudonym_secret: ""        # Optional HMAC key for stable pseudonyms/hashes in logs
+
+    # The following are example global writer settings used by the bridge framework.
+    # Keep or remove as appropriate for your environment.
     min_level: debug
     writers:
     - type: stdout

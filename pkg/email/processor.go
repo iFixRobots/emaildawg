@@ -21,20 +21,26 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+	logging "go.mau.fi/mautrix-emaildawg/pkg/logging"
 )
 
 // Processor handles the complete email processing pipeline
 type Processor struct {
 	log           *zerolog.Logger
 	threadManager *ThreadManager
+
+	sanitized bool
+	secret    string
 }
 
 // NewProcessor creates a new email processor
-func NewProcessor(log *zerolog.Logger, threadManager *ThreadManager) *Processor {
+func NewProcessor(log *zerolog.Logger, threadManager *ThreadManager, sanitized bool, secret string) *Processor {
 	logger := log.With().Str("component", "email_processor").Logger()
 	return &Processor{
 		log:           &logger,
 		threadManager: threadManager,
+		sanitized:     sanitized,
+		secret:       secret,
 	}
 }
 
@@ -61,11 +67,19 @@ func (p *Processor) ProcessIMAPMessage(ctx context.Context, fetchData *imapclien
 		return nil, fmt.Errorf("failed to parse IMAP fetch data: %w", err)
 	}
 
-	p.log.Debug().
-		Str("message_id", parsedEmail.MessageID).
-		Str("subject", parsedEmail.Subject).
-		Str("from", parsedEmail.From).
-		Msg("Successfully parsed email message")
+	if p.sanitized {
+		p.log.Debug().
+			Str("message_id_hash", logging.HashHMAC(parsedEmail.MessageID, p.secret, 10)).
+			Str("subject_hash", logging.HashHMAC(parsedEmail.Subject, p.secret, 10)).
+			Str("from_masked", logging.MaskEmail(parsedEmail.From)).
+			Msg("Successfully parsed email message")
+	} else {
+		p.log.Debug().
+			Str("message_id", parsedEmail.MessageID).
+			Str("subject", parsedEmail.Subject).
+			Str("from", parsedEmail.From).
+			Msg("Successfully parsed email message")
+	}
 
 	// Step 1: Determine thread membership
 	thread := p.threadManager.DetermineThread(parsedEmail)
@@ -94,11 +108,19 @@ func (p *Processor) ProcessIMAPMessage(ctx context.Context, fetchData *imapclien
 		IsOutbound:  isOutbound,
 	}
 
-	p.log.Info().
-		Str("thread_id", thread.ThreadID).
-		Str("portal_key", string(portalKey.ID)).
-		Bool("is_outbound", isOutbound).
-		Msg("Successfully processed complete IMAP message")
+	if p.sanitized {
+		p.log.Info().
+			Str("thread_id", logging.HashHMAC(thread.ThreadID, p.secret, 10)).
+			Str("portal_key", logging.HashHMAC(string(portalKey.ID), p.secret, 10)).
+			Bool("is_outbound", isOutbound).
+			Msg("Successfully processed complete IMAP message")
+	} else {
+		p.log.Info().
+			Str("thread_id", thread.ThreadID).
+			Str("portal_key", string(portalKey.ID)).
+			Bool("is_outbound", isOutbound).
+			Msg("Successfully processed complete IMAP message")
+	}
 
 	// Add attachments to the email message (already extracted in parseIMAPFetchData)
 	emailMessage.Attachments = parsedEmail.Attachments

@@ -119,6 +119,8 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		emailClient.Password,
 		login,
 		&logger,
+		ec.Config.Logging.Sanitized,
+		ec.Config.Logging.PseudonymSecret,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
