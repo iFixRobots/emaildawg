@@ -28,7 +28,6 @@ type EmailConnector struct {
 	ThreadManager *email.ThreadManager
 	Processor     *email.Processor
 	DB            *EmailAccountQuery
-	ThreadIndex   *EmailThreadIndexQuery
 }
 
 var (
@@ -118,11 +117,6 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	if err := ec.DB.CreateTable(ctx); err != nil {
 		bridge.Log.Fatal().Err(err).Msg("Failed to create email_accounts table")
 	}
-	// Create thread index table and helper
-	ec.ThreadIndex = &EmailThreadIndexQuery{DB: bridge.DB}
-	if err := ec.ThreadIndex.CreateTable(ctx); err != nil {
-		bridge.Log.Fatal().Err(err).Msg("Failed to create email_thread_index table")
-	}
 	// Database health check: ensure we can write to the DB directory to avoid runtime I/O errors
 	if err := ec.checkDBWritable(ctx); err != nil {
 		bridge.Log.Fatal().Err(err).Msg("Database is not writable. Fix filesystem permissions or remove stale DB files, then restart the bridge.")
@@ -144,7 +138,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Prefer a DB-backed resolver that can find existing portals by prior bridged messages
 	resolver := &DBThreadMetadataResolver{Bridge: bridge, Log: &roomLogger, Network: "email"}
-	ec.ThreadManager = email.NewThreadManager(ec.ThreadIndex, resolver)
+	ec.ThreadManager = email.NewThreadManager(resolver)
 	
 	// Initialize email processor and wire it to the IMAP manager
 	processorLogger := bridge.Log.With().Str("component", "email_processor").Logger()

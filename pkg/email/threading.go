@@ -43,11 +43,6 @@ func (thread *EmailThread) ClearParticipantChanges() {
 }
 
 // ThreadManager handles email threading detection and management
-// ThreadIndex provides persistent lookup/mapping for message IDs to thread IDs, scoped by receiver.
-type ThreadIndex interface {
-	GetThreadIDFor(receiver string, msgID string) (string, error)
-	MapThreadIDs(receiver, threadID string, msgIDs []string) error
-}
 
 // ThreadMetadataResolver allows consulting external metadata to resolve a thread ID
 // from a message ID for a specific receiver (e.g., bridgev2 metadata).
@@ -62,15 +57,13 @@ type ThreadManager struct {
 	maxThreads   int
 	lastUsed     map[string]time.Time // For LRU eviction
 	mu           sync.RWMutex
-	index        ThreadIndex           // optional persistent index
 	resolver     ThreadMetadataResolver // optional external resolver
 }
 
 // NewThreadManager creates a new email thread manager
-func NewThreadManager(index ThreadIndex, resolver ThreadMetadataResolver) *ThreadManager {
+func NewThreadManager(resolver ThreadMetadataResolver) *ThreadManager {
 	return &ThreadManager{
 		knownThreads: make(map[string]*EmailThread),
-		index:        index,
 		resolver:     resolver,
 	}
 }
@@ -106,29 +99,6 @@ func (tm *ThreadManager) CacheForReceiver(receiver string, thread *EmailThread) 
 	tm.cacheThread(receiver, thread)
 }
 
-// MapThread records message IDs related to this thread into the persistent index (if configured).
-func (tm *ThreadManager) MapThread(receiver string, thread *EmailThread, email *ParsedEmail) {
-	if tm.index == nil || thread == nil || email == nil {
-		return
-	}
-	ids := make([]string, 0, 2+len(email.References))
-	if email.MessageID != "" {
-		ids = append(ids, email.MessageID)
-	}
-	if email.InReplyTo != "" {
-		ids = append(ids, email.InReplyTo)
-	}
-	for _, r := range email.References {
-		if r != "" {
-			ids = append(ids, r)
-		}
-	}
-	if len(ids) == 0 {
-		return
-	}
-	// Best-effort persist; ignore errors to avoid blocking message delivery.
-	_ = tm.index.MapThreadIDs(receiver, thread.ThreadID, ids)
-}
 
 // ParsedEmail represents a parsed email message
 type ParsedEmail struct {
@@ -208,28 +178,6 @@ func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *E
 		}
 		for _, refID := range email.References {
 			if tid, ok := tm.resolver.ResolveThreadID(receiver, refID); ok && tid != "" {
-				if thread := tm.getCachedThread(receiver, tid); thread != nil {
-					return tm.addToExistingThread(thread, email)
-				}
-				thread := &EmailThread{ThreadID: tid, Subject: email.Subject}
-				return tm.addToExistingThread(thread, email)
-			}
-		}
-	}
-	// Step 0b: Consult persistent index if available
-	if tm.index != nil {
-		if email.InReplyTo != "" {
-			if tid, err := tm.index.GetThreadIDFor(receiver, email.InReplyTo); err == nil && tid != "" {
-				if thread := tm.getCachedThread(receiver, tid); thread != nil {
-					return tm.addToExistingThread(thread, email)
-				}
-				// Not cached: create minimal thread handle to continue; full metadata filled from this email
-				thread := &EmailThread{ThreadID: tid, Subject: email.Subject}
-				return tm.addToExistingThread(thread, email)
-			}
-		}
-		for _, refID := range email.References {
-			if tid, err := tm.index.GetThreadIDFor(receiver, refID); err == nil && tid != "" {
 				if thread := tm.getCachedThread(receiver, tid); thread != nil {
 					return tm.addToExistingThread(thread, email)
 				}

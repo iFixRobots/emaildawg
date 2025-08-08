@@ -47,18 +47,34 @@ func (r *DBThreadMetadataResolver) ResolveThreadID(receiver, messageID string) (
 		// Candidate queries. We try in order. Any SQL error is treated as a miss and we move on.
 		// 1) Common layout: message(network, remote_id, receiver, portal_id)
 		if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, rid, receiver); tid != "" {
-			return normalizeThreadID(tid), true
+			ntid := normalizeThreadID(tid)
+			if r.Log != nil {
+				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
+			}
+			return ntid, true
 		}
 		// 2) Without receiver column
 		if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ?`, r.Network, rid); tid != "" {
-			return normalizeThreadID(tid), true
+			ntid := normalizeThreadID(tid)
+			if r.Log != nil {
+				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
+			}
+			return ntid, true
 		}
 		// 3) Alternate table name: messages
 		if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, rid, receiver); tid != "" {
-			return normalizeThreadID(tid), true
+			ntid := normalizeThreadID(tid)
+			if r.Log != nil {
+				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
+			}
+			return ntid, true
 		}
 		if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ?`, r.Network, rid); tid != "" {
-			return normalizeThreadID(tid), true
+			ntid := normalizeThreadID(tid)
+			if r.Log != nil {
+				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
+			}
+			return ntid, true
 		}
 	}
 
