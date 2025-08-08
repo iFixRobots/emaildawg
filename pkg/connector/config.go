@@ -42,7 +42,6 @@ func (ec *EmailConnector) GetConfig() (string, any, up.Upgrader) {
 		SimpleUpgrader: up.SimpleUpgrader(upgradeConfig),
 		Blocks: [][]string{
 			{"imap"},
-			{"logging"},
 		},
 		Base: ExampleConfig,
 	}
