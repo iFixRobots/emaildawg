@@ -81,8 +81,8 @@ Build and run:
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
 make build
-./mautrix-emaildawg --generate-example-config
-./mautrix-emaildawg --generate-registration
+./emaildawg --generate-example-config
+./emaildawg --generate-registration
 # Edit config.yaml with your homeserver details
 # Register registration.yaml with your Matrix homeserver
 ./emaildawg
@@ -91,9 +91,9 @@ make build
 ## Configuration
 
 Initial setup:
-1. Generate configuration: `./mautrix-emaildawg --generate-example-config`
+1. Generate configuration: `./emaildawg --generate-example-config`
 2. Edit homeserver settings in config.yaml
-3. Generate registration: `./mautrix-emaildawg --generate-registration`
+3. Generate registration: `./emaildawg --generate-registration`
 4. Register with your homeserver (add registration.yaml to the homeserver config)
 5. Start the bridge
 
