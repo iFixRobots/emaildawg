@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -98,6 +99,15 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	// Set global instance for command access
 	ConnectorInstance = ec
 	
+	// Ensure ./data directory exists for local SQLite files and sidecar WAL/SHM files
+	dataDir := filepath.Join(".", "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		bridge.Log.Warn().Err(err).Str("path", dataDir).Msg("Failed to ensure data directory exists")
+	}
+	if wd, err := os.Getwd(); err == nil {
+		bridge.Log.Info().Str("cwd", wd).Str("data_dir", dataDir).Msg("Startup environment")
+	}
+
 	// Initialize database
 	ec.DB = &EmailAccountQuery{
 		DB: bridge.DB,
@@ -109,7 +119,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		bridge.Log.Fatal().Err(err).Msg("Failed to create email_accounts table")
 	}
 	// Create thread index table and helper
-ec.ThreadIndex = &EmailThreadIndexQuery{DB: bridge.DB}
+	ec.ThreadIndex = &EmailThreadIndexQuery{DB: bridge.DB}
 	if err := ec.ThreadIndex.CreateTable(ctx); err != nil {
 		bridge.Log.Fatal().Err(err).Msg("Failed to create email_thread_index table")
 	}

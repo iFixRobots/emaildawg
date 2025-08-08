@@ -51,3 +51,54 @@ Thumbs.db
 
 # Testing
 coverage.txt
+
+# SQLite auxiliary files (WAL, SHM, journal)
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db.tmp
+
+# Go build/test artifacts
+/dist/
+/build/
+cover.out
+coverage/
+*.coverprofile
+*.cov
+*.pprof
+cpu.prof
+mem.prof
+profile.out
+
+# Docker/compose/env overrides
+/docker-compose.override.yml
+.env.local
+.env.*.local
+.env.test
+.env.development
+.env.production
+
+# Editor/tool caches
+.fleet/
+.direnv/
+.ruff_cache/
+.pytest_cache/
+
+# macOS extras (additional)
+Icon
+.AppleDouble
+.LSOverride
+.apdisk
+.fseventsd
+
+# Sensitive files (avoid committing keys/certs)
+*.pem
+*.key
+*.crt
+*.p12
+*.pkcs12
+*.keystore
+*.asc
+.git-credentials
