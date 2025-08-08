@@ -135,8 +135,8 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	roomLogger := bridge.Log.With().Str("component", "matrix").Logger()
 	ec.RoomManager = matrix.NewRoomManager(&roomLogger)
 	
-	// Wire a stub resolver for now; it will log attempts and return no match
-	resolver := &StubThreadMetadataResolver{Log: &roomLogger}
+	// Prefer a DB-backed resolver that can find existing portals by prior bridged messages
+	resolver := &DBThreadMetadataResolver{Bridge: bridge, Log: &roomLogger, Network: "email"}
 	ec.ThreadManager = email.NewThreadManager(ec.ThreadIndex, resolver)
 	
 	// Initialize email processor and wire it to the IMAP manager
