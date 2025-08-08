@@ -63,6 +63,8 @@ cd emaildawg
 ./mautrix-emaildawg --generate-example-config
 ./mautrix-emaildawg --generate-registration
 # Edit config.yaml with your Matrix homeserver details
+# IMPORTANT: The default SQLite DB URI is file:./data/emaildawg.db; ensure ./data exists and is writable.
+mkdir -p ./data
 docker-compose up -d
 ```
 

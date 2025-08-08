@@ -88,13 +88,14 @@ var (
 		RequiresLogin: true,
 	}
 
-	// Destructive: Deletes the bridge database immediately. Intended for homeserver-driven deletions.
-	CommandNuke = &commands.FullHandler{
+// Destructive: Deletes the bridge database immediately. Intended for homeserver-driven deletions.
+CommandNuke = &commands.FullHandler{
 		Func: fnNuke,
 		Name: "nuke",
 		Help: commands.HelpMeta{
 			Section:     HelpSectionAdmin,
-			Description: "Delete all bridge state (database). Intended for automated bridge removal.",
+			Description: "Delete all bridge state (database). Requires explicit confirmation: !email nuke confirm",
+			Args:        "[confirm]",
 		},
 		RequiresLogin: false,
 	}
@@ -197,6 +198,11 @@ func fnStatus(ce *commands.Event) {
 // fnNuke deletes the bridge database files immediately.
 // This is intended to be called by the homeserver/bridge bot during bridge removal.
 func fnNuke(ce *commands.Event) {
+	// Require explicit confirmation to avoid accidental data loss
+	if len(ce.Args) == 0 || strings.ToLower(ce.Args[0]) != "confirm" {
+		ce.Reply("⚠️ This will DELETE the bridge database files and cannot be undone.\nConfirm with: `!email nuke confirm`.")
+		return
+	}
 	if ConnectorInstance == nil {
 		ce.Reply("⚠️ Bridge not initialized.")
 		return
@@ -205,8 +211,14 @@ func fnNuke(ce *commands.Event) {
 	if ConnectorInstance.IMAPManager != nil {
 		ConnectorInstance.IMAPManager.StopAll()
 	}
-	// Known DB files in working dir
+	// Try common DB file locations based on defaults and documentation
 	candidates := []string{
+		"emaildawg.db",
+		"emaildawg.db-wal",
+		"emaildawg.db-shm",
+		"./data/emaildawg.db",
+		"./data/emaildawg.db-wal",
+		"./data/emaildawg.db-shm",
 		"sh-emaildawg.db",
 		"sh-emaildawg.db-wal",
 		"sh-emaildawg.db-shm",

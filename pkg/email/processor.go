@@ -1171,8 +1171,14 @@ func (e *EmailMatrixEvent) convertAttachmentToMatrix(ctx context.Context, attach
 		return nil, fmt.Errorf("attachment exceeds upload limit (%d bytes > %d bytes)", attachment.Size, e.processor.MaxUploadBytes)
 	}
 
+	// Sanitize filename for upload
+	safeName := sanitizeFilename(attachment.Filename)
+	if safeName == "" {
+		safeName = bestFilename(attachment, "attachment")
+		safeName = sanitizeFilename(safeName)
+	}
 	// Upload the attachment data to Matrix media repository
-	uploadResp, _, err := intent.UploadMedia(ctx, "", attachment.Data, attachment.Filename, attachment.ContentType)
+	uploadResp, _, err := intent.UploadMedia(ctx, "", attachment.Data, safeName, attachment.ContentType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload attachment to Matrix: %w", err)
 	}
@@ -1320,6 +1326,32 @@ func bestFilename(att *EmailAttachment, fallback string) string {
 	return "inline"
 }
 
+// sanitizeFilename removes path separators, trims control chars, and bounds length.
+func sanitizeFilename(name string) string {
+	name = strings.TrimSpace(name)
+	// Replace path separators with underscore
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, "/", "_")
+	// Remove control characters
+	builder := strings.Builder{}
+	for _, r := range name {
+		if r < 32 || r == 127 { // control chars
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	name = builder.String()
+	if name == "" {
+		return name
+	}
+	// Bound length to a reasonable size
+	const maxLen = 128
+	if len(name) > maxLen {
+		name = name[:maxLen]
+	}
+	return name
+}
+
 // externalizeDataURIs finds data: URLs in HTML, uploads them to media, and rewrites to mxc URLs.
 // Returns (rewrittenHTML, replaced, failed)
 func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridgev2.MatrixAPI, html string) (string, int, int) {
@@ -1356,6 +1388,7 @@ func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridg
 		if strings.HasPrefix(mimeType, "image/") {
 			name = "inline." + strings.TrimPrefix(mimeType, "image/")
 		}
+		name = sanitizeFilename(name)
 		mxc, _, err := intent.UploadMedia(ctx, "", data, name, mimeType)
 		if err != nil {
 			failed++
@@ -1380,7 +1413,8 @@ func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridg
 			return m
 		}
 		name := "inline"
-		mxc, _, err := intent.UploadMedia(ctx, "", data, name, mimeType)
+			name = sanitizeFilename(name)
+			mxc, _, err := intent.UploadMedia(ctx, "", data, name, mimeType)
 		if err != nil {
 			failed++
 			return m

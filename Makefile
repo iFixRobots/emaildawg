@@ -31,8 +31,13 @@ endif
 # Build targets
 .PHONY: build clean install test
 
+TAG := $(shell git describe --exact-match --tags 2>/dev/null || echo unknown)
+COMMIT := $(shell git rev-parse --short=12 HEAD)
+BUILD_TIME := $(shell date -Iseconds)
+GO_LDFLAGS := -s -w -X main.Tag=$(TAG) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)
+
 build:
-	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -o mautrix-emaildawg ./cmd/mautrix-emaildawg
+	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -ldflags "$(GO_LDFLAGS)" -o mautrix-emaildawg ./cmd/mautrix-emaildawg
 
 clean:
 	rm -f mautrix-emaildawg

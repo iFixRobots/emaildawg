@@ -1,29 +1,40 @@
-FROM golang:1.22-alpine AS builder
+# --- Builder stage (Debian bookworm) ---
+FROM golang:1.22.5-bookworm AS builder
 
 # Install build dependencies including libolm
-RUN apk add --no-cache git ca-certificates build-base olm-dev
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends git ca-certificates build-essential libolm-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-# Enable CGO and build with libolm support
-RUN CGO_ENABLED=1 CGO_CFLAGS="-I/usr/include" CGO_LDFLAGS="-L/usr/lib" go build -o mautrix-emaildawg ./cmd/mautrix-emaildawg
+# Build with CGO to link against libolm
+RUN CGO_ENABLED=1 go build -o mautrix-emaildawg ./cmd/mautrix-emaildawg
 
-FROM alpine:latest
+# --- Runtime dependencies stage (Debian bookworm-slim) ---
+FROM debian:bookworm-slim AS runtime-deps
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends ca-certificates libolm3 tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install runtime dependencies
-RUN apk --no-cache add ca-certificates olm tzdata
+# --- Final minimal runtime (Distroless) ---
+# Distroless base matching Debian 12
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+# Copy the compiled binary
+COPY --from=builder /build/mautrix-emaildawg /usr/bin/mautrix-emaildawg
+# Copy only required shared libraries and data from runtime-deps
+COPY --from=runtime-deps /usr/lib/x86_64-linux-gnu/libolm.so.3 /usr/lib/x86_64-linux-gnu/libolm.so.3
+COPY --from=runtime-deps /usr/lib/x86_64-linux-gnu/libolm.so /usr/lib/x86_64-linux-gnu/libolm.so
+COPY --from=runtime-deps /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=runtime-deps /usr/share/zoneinfo /usr/share/zoneinfo
+
 WORKDIR /opt/mautrix-emaildawg
-
-# Create data directory
-RUN mkdir -p /opt/mautrix-emaildawg/data
-
-COPY --from=builder /build/mautrix-emaildawg /usr/bin/
-
-USER 1337
+# Expose a writable volume for data (mount a host volume here)
+VOLUME ["/opt/mautrix-emaildawg/data"]
 
 EXPOSE 29319
-
-CMD ["/usr/bin/mautrix-emaildawg"]
+ENTRYPOINT ["/usr/bin/mautrix-emaildawg"]

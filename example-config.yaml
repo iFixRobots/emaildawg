@@ -41,9 +41,9 @@ database:
     # The database type. "sqlite3-fk-wal" and "postgres" are supported.
     type: sqlite3-fk-wal
     # The database URI.
-    #   SQLite: A raw file path is supported, but `file:<path>?_txlock=immediate` is recommended.
-    #   Postgres: Connection string. For example, postgres://user:password@host/database?sslmode=disable
-    uri: file:emaildawg.db?_txlock=immediate
+  #   SQLite: A raw file path is supported, but `file:<path>?_txlock=immediate` is recommended.
+  #   Postgres: Connection string. For example, postgres://user:password@host/database?sslmode=disable
+    uri: file:./data/emaildawg.db?_txlock=immediate
     # Maximum number of connections.
     max_open_conns: 5
     max_idle_conns: 1
