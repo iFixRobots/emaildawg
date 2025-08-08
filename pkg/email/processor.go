@@ -613,10 +613,11 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		Body:    e.emailMessage.TextContent,
 	}
 
+	origHTML := e.emailMessage.HTMLContent
 	// Add HTML formatting if available
-	if e.emailMessage.HTMLContent != "" && e.emailMessage.HTMLContent != e.emailMessage.TextContent {
+	if origHTML != "" && origHTML != e.emailMessage.TextContent {
 		content.Format = event.FormatHTML
-		content.FormattedBody = e.emailMessage.HTMLContent
+		content.FormattedBody = origHTML
 	}
 
 	// Add email metadata to the message
@@ -624,6 +625,52 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		content.Body = "[No text content]"
 	}
 
+	// Enforce a size budget to avoid 64 KiB Matrix event limit.
+	// We'll use a conservative threshold of ~60 KiB before encryption/overhead.
+	const sizeBudget = 60 * 1024
+	estSize := len(content.Body)
+	if content.FormattedBody != "" {
+		estSize += len(content.FormattedBody)
+	}
+	// Add a small overhead for JSON keys/structuring
+	estSize += 1024
+
+	// If content appears too large, try bounded HTML minification, then fall back to plain text + HTML as attachment.
+	if estSize > sizeBudget && content.FormattedBody != "" {
+		// Attempt to minify HTML to a bounded size (e.g., ~40 KiB budget for HTML).
+		if minified, ok := boundedMinifyHTML(content.FormattedBody, 40*1024); ok {
+			content.FormattedBody = minified
+			// Re-estimate
+			estSize = len(content.Body) + len(content.FormattedBody) + 1024
+		}
+		// Still too big? Drop inline HTML and attach original HTML as a file.
+		if estSize > sizeBudget {
+			content.FormattedBody = ""
+			// Add a small notice in the body.
+			if content.Body != "" {
+				content.Body += "\n\n[Full HTML too large to send inline — attached below]"
+			} else {
+				content.Body = "[Full HTML too large to send inline — attached below]"
+			}
+			// Upload original HTML as attachment
+			htmlBytes := []byte(origHTML)
+			mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, "original-email.html", "text/html")
+			if err != nil {
+				// If upload fails, add a notice instead of failing the whole message
+				e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
+				notice := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
+				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: notice})
+			} else {
+				att := &event.MessageEventContent{
+					MsgType: event.MsgFile,
+					Body:    "original-email.html",
+					URL:     mxc,
+				}
+				att.Info = &event.FileInfo{MimeType: "text/html", Size: len(htmlBytes)}
+				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
+			}
+		}
+	}
 
 	// Add participant change notification if any
 	if participantChangeMsg := generateParticipantChangeMessage(e.emailMessage.Thread); participantChangeMsg != "" {
@@ -635,41 +682,111 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			Type:    event.EventMessage,
 			Content: changeContent,
 		})
-		
 		// Clear the changes after processing
 		e.emailMessage.Thread.ClearParticipantChanges()
 	}
 
 	// Add the main message part
-	parts = append(parts, &bridgev2.ConvertedMessagePart{
-		Type:    event.EventMessage,
-		Content: content,
-	})
+	parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: content})
 
 	// Process attachments and upload them to Matrix
 	for _, attachment := range e.emailMessage.Attachments {
 		if attachmentPart, err := e.convertAttachmentToMatrix(ctx, attachment, intent); err == nil {
 			parts = append(parts, attachmentPart)
 		} else {
-			e.processor.log.Warn().Err(err).
-				Str("filename", attachment.Filename).
-				Msg("Failed to upload attachment to Matrix")
-			
+			e.processor.log.Warn().Err(err).Str("filename", attachment.Filename).Msg("Failed to upload attachment to Matrix")
 			// Add a fallback text message for failed attachment
-			fallbackContent := &event.MessageEventContent{
-				MsgType: event.MsgNotice,
-				Body:    fmt.Sprintf("📎 Attachment failed to upload: %s (%s)", attachment.Filename, attachment.ContentType),
-			}
-			parts = append(parts, &bridgev2.ConvertedMessagePart{
-				Type:    event.EventMessage,
-				Content: fallbackContent,
-			})
+			fallbackContent := &event.MessageEventContent{MsgType: event.MsgNotice, Body: fmt.Sprintf("📎 Attachment failed to upload: %s (%s)", attachment.Filename, attachment.ContentType)}
+			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: fallbackContent})
 		}
 	}
 
-	return &bridgev2.ConvertedMessage{
-		Parts: parts,
-	}, nil
+	return &bridgev2.ConvertedMessage{Parts: parts}, nil
+}
+
+// boundedMinifyHTML performs a very simple minification and bounds output size without breaking tags badly.
+// Returns (result, ok). If ok=false, caller should assume no useful minification happened.
+func boundedMinifyHTML(html string, maxBytes int) (string, bool) {
+	// Cheap removals: comments, script/style blocks, excessive whitespace.
+	// Note: This is intentionally simple to avoid heavy dependencies.
+	// 1) Remove <!-- comments -->
+	html = removeHTMLComments(html)
+	// 2) Remove <script>...</script> and <style>...</style>
+	html = stripTagContent(html, "script")
+	html = stripTagContent(html, "style")
+	// 3) Collapse runs of whitespace
+	html = collapseWhitespace(html)
+	if len(html) <= maxBytes {
+		return html, true
+	}
+	// Truncate at a safe boundary: try to cut at last closing tag before maxBytes
+	if maxBytes < len(html) {
+		cut := maxBytes
+		// backtrack to a tag boundary to avoid cutting in the middle of a tag
+		for cut > 0 {
+			c := html[cut-1]
+			if c == '>' || c == '\n' || c == ' ' {
+				break
+			}
+			cut--
+		}
+		if cut < 1 {
+			cut = maxBytes
+		}
+		res := html[:cut] + "\n<!-- truncated -->"
+		return res, true
+	}
+	return html, false
+}
+
+func removeHTMLComments(s string) string {
+	// Remove <!-- ... --> blocks (non-greedy). This is simplistic and won't handle edge cases with "--" in text.
+	for {
+		start := strings.Index(s, "<!--")
+		if start == -1 { break }
+		end := strings.Index(s[start+4:], "-->")
+		if end == -1 { break }
+		end += start + 4
+		s = s[:start] + s[end+3:]
+	}
+	return s
+}
+
+func stripTagContent(s, tag string) string {
+	open := "<" + tag
+	close := "</" + tag + ">"
+	for {
+		start := strings.Index(strings.ToLower(s), open)
+		if start == -1 { break }
+		end := strings.Index(strings.ToLower(s[start:]), close)
+		if end == -1 { // no close, remove from start to end
+			s = s[:start]
+			break
+		}
+		end = start + end + len(close)
+		s = s[:start] + s[end:]
+	}
+	return s
+}
+
+func collapseWhitespace(s string) string {
+	// Replace runs of spaces/tabs/newlines with a single space/newline where appropriate.
+	// For simplicity, collapse consecutive whitespace to a single space.
+	var b strings.Builder
+	b.Grow(len(s))
+	prevWS := false
+	for _, r := range s {
+		if r == ' ' || r == '\n' || r == '\t' || r == '\r' { // whitespace
+			if !prevWS {
+				b.WriteByte(' ')
+				prevWS = true
+			}
+			continue
+		}
+		prevWS = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 
