@@ -3,6 +3,7 @@ package email
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -34,16 +35,24 @@ type Processor struct {
 
 	sanitized bool
 	secret    string
+
+	// MaxUploadBytes limits individual media uploads to Matrix. Items larger than this
+	// will either be gzipped (for text/html and text/plain bodies) or skipped with a notice.
+	MaxUploadBytes int
+	// When true, attempt gzip for oversized original email bodies before giving up.
+	GzipLargeBodies bool
 }
 
 // NewProcessor creates a new email processor
 func NewProcessor(log *zerolog.Logger, threadManager *ThreadManager, sanitized bool, secret string) *Processor {
 	logger := log.With().Str("component", "email_processor").Logger()
 	return &Processor{
-		log:           &logger,
-		threadManager: threadManager,
-		sanitized:     sanitized,
-		secret:       secret,
+		log:             &logger,
+		threadManager:   threadManager,
+		sanitized:       sanitized,
+		secret:         secret,
+		MaxUploadBytes: 10 * 1024 * 1024, // 10 MiB default; can be made configurable later
+		GzipLargeBodies: true,
 	}
 }
 
@@ -180,7 +189,7 @@ func (p *Processor) parseIMAPFetchData(fetchData *imapclient.FetchMessageData) (
 		parsedEmail.Bcc = formatIMAPAddressSlice(env.Bcc)
 	}
 
-	// Parse body sections for text and HTML content
+// Parse body sections for text and HTML content
 	textContent, htmlContent, err := p.parseMessageBody(buf)
 	if err != nil {
 		p.log.Warn().Err(err).Msg("Failed to parse message body, using fallback")
@@ -210,8 +219,15 @@ func (p *Processor) parseIMAPFetchData(fetchData *imapclient.FetchMessageData) (
 
 // parseMessageBody extracts text and HTML content from IMAP body sections
 func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textContent, htmlContent string, err error) {
+	// High-level: log the number of body sections
+	p.log.Debug().Int("body_section_count", len(buf.BodySection)).Msg("Parsing message body sections")
 	// Prefer MIME parsing for any non-header sections to avoid dumping boundaries/headers
-	for _, section := range buf.BodySection {
+	for idx, section := range buf.BodySection {
+		p.log.Trace().
+			Int("section_index", idx).
+			Str("specifier", string(section.Section.Specifier)).
+			Int("bytes", len(section.Bytes)).
+			Msg("Processing body section")
 		if len(section.Bytes) == 0 {
 			continue
 		}
@@ -230,7 +246,7 @@ func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textCo
 		}
 	}
 
-	// If we don't have text/plain but we do have HTML, derive a simple plaintext fallback
+// If we don't have text/plain but we do have HTML, derive a simple plaintext fallback
 	if textContent == "" && htmlContent != "" {
 		textContent = simpleHTMLToText(htmlContent)
 	}
@@ -238,6 +254,10 @@ func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textCo
 	if textContent == "" {
 		textContent = "[No readable text content found]"
 	}
+	p.log.Debug().
+		Int("text_len", len(textContent)).
+		Int("html_len", len(htmlContent)).
+		Msg("Finished parsing message body")
 
 	return textContent, htmlContent, nil
 }
@@ -317,9 +337,12 @@ func (p *Processor) parseMultipartContent(body io.Reader, boundary string) (text
 			continue
 		}
 
-		// Check Content-Type of this part
+// Check Content-Type of this part
 		contentType := part.Header.Get("Content-Type")
 		mediaType, params, _ := mime.ParseMediaType(contentType)
+		p.log.Trace().
+			Str("mime_media_type", mediaType).
+			Msg("Multipart content: encountered part")
 
 		switch {
 		case strings.HasPrefix(mediaType, "multipart/"):
@@ -352,9 +375,15 @@ func (p *Processor) extractAttachments(buf *imapclient.FetchMessageBuffer) ([]*E
 	}
 
 	var attachments []*EmailAttachment
+	p.log.Debug().Int("body_section_count", len(buf.BodySection)).Msg("Starting attachment extraction")
 
 	// Look through body sections for attachments
-	for _, section := range buf.BodySection {
+	for idx, section := range buf.BodySection {
+		p.log.Trace().
+			Int("section_index", idx).
+			Str("specifier", string(section.Section.Specifier)).
+			Int("bytes", len(section.Bytes)).
+			Msg("Examining section for attachments")
 		if len(section.Bytes) == 0 {
 			continue
 		}
@@ -408,7 +437,7 @@ func (p *Processor) extractMultipartAttachments(data []byte) []*EmailAttachment 
 func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) []*EmailAttachment {
 	var attachments []*EmailAttachment
 
-	mr := multipart.NewReader(body, boundary)
+mr := multipart.NewReader(body, boundary)
 	for {
 		part, err := mr.NextPart()
 		if err != nil {
@@ -421,8 +450,10 @@ func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) [
 		contentDisposition := part.Header.Get("Content-Disposition")
 		dispLower := strings.ToLower(strings.TrimSpace(contentDisposition))
 
-		// Read part body
-		dataBytes, err := io.ReadAll(part)
+// Read and decode part body
+		cte := strings.ToLower(part.Header.Get("Content-Transfer-Encoding"))
+		decoded := decodeBody(part, cte)
+		dataBytes, err := io.ReadAll(decoded)
 		part.Close()
 		if err != nil {
 			continue
@@ -431,6 +462,12 @@ func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) [
 		// Determine content type and parameters
 		ct := part.Header.Get("Content-Type")
 		mediaType, params, _ := mime.ParseMediaType(ct)
+		p.log.Trace().
+			Str("mime_media_type", mediaType).
+			Str("content_disposition", strings.ToLower(strings.TrimSpace(part.Header.Get("Content-Disposition")))).
+			Str("cte", cte).
+			Int("decoded_bytes", len(dataBytes)).
+			Msg("Attachment parsing: encountered part")
 		if ct == "" {
 			ct = "application/octet-stream"
 			mediaType = ct
@@ -458,17 +495,17 @@ func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) [
 
 		// Decide if this is a real attachment to expose:
 		// - Always include if disposition is attachment
+		// - Include any part with a filename (even text/*)
 		// - Include inline images/files if they have Content-ID or Content-Location (for HTML inlining)
-		// - Otherwise, skip common body parts like text/plain and text/html without attachment disposition
+		// - Otherwise, skip common body parts like text/plain and text/html without attachment indicators
 		isText := strings.HasPrefix(strings.ToLower(mediaType), "text/")
 		isAttachmentDisposition := strings.Contains(dispLower, "attachment")
 		isInlineReference := contentID != "" || contentLocation != ""
-		if !isAttachmentDisposition && !isInlineReference {
-			// Skip non-attachment, non-inline-reference parts (likely body text)
+		if !(isAttachmentDisposition || filename != "" || isInlineReference) {
+			// Skip non-attachment, non-inline-reference parts (likely body text or generic parts)
 			if isText {
 				continue
 			}
-			// If no filename and no inline ref, skip generic parts
 			if filename == "" {
 				continue
 			}
@@ -653,6 +690,11 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 	cidToMXC := make(map[string]string)
 	locToMXC := make(map[string]string)
 	origHTML := e.emailMessage.HTMLContent
+	e.processor.log.Debug().
+		Int("attachments", len(e.emailMessage.Attachments)).
+		Int("text_len", len(e.emailMessage.TextContent)).
+		Int("html_len", len(origHTML)).
+		Msg("Converting email to Matrix event")
 	if origHTML != "" {
 		// Build index of inline-capable attachments
 		for _, att := range e.emailMessage.Attachments {
@@ -666,15 +708,27 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 				locToMXC[att.ContentLocation] = ""
 			}
 		}
-		// Find referenced CIDs and content-locations, upload and map to MXC
+// Find referenced CIDs and content-locations, upload and map to MXC
 		referencedCIDs := findCIDsInHTML(origHTML)
 		referencedLocs := findContentLocationsInHTML(origHTML)
+		pcount := func(m map[string]string) int { c := 0; for _, v := range m { if v != "" { c++ } }; return c }
+		e.processor.log.Debug().
+			Int("cid_candidates", len(cidToMXC)).
+			Int("loc_candidates", len(locToMXC)).
+			Int("cid_refs", len(referencedCIDs)).
+			Int("loc_refs", len(referencedLocs)).
+			Msg("Inline reference analysis before upload")
 		// Upload CIDs
+		tooLargeInline := 0
 		for cid := range referencedCIDs {
 			idx := findAttachmentByCID(e.emailMessage.Attachments, cid)
 			if idx >= 0 {
 				att := e.emailMessage.Attachments[idx]
 				if cidToMXC[cid] == "" {
+					if e.processor.MaxUploadBytes > 0 && att.Size > int64(e.processor.MaxUploadBytes) {
+						tooLargeInline++
+						continue
+					}
 					mxc, _, err := intent.UploadMedia(ctx, "", att.Data, bestFilename(att, cid), att.ContentType)
 					if err == nil {
 						cidToMXC[cid] = string(mxc)
@@ -689,6 +743,10 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			if idx >= 0 {
 				att := e.emailMessage.Attachments[idx]
 				if locToMXC[loc] == "" {
+					if e.processor.MaxUploadBytes > 0 && att.Size > int64(e.processor.MaxUploadBytes) {
+						tooLargeInline++
+						continue
+					}
 					mxc, _, err := intent.UploadMedia(ctx, "", att.Data, bestFilename(att, loc), att.ContentType)
 					if err == nil {
 						locToMXC[loc] = string(mxc)
@@ -697,8 +755,17 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 				}
 			}
 		}
-		// Rewrite HTML with MXC URLs
+		if tooLargeInline > 0 {
+			n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: fmt.Sprintf("Some inline resources were too large and were omitted (%d).", tooLargeInline)}
+			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+		}
+// Rewrite HTML with MXC URLs
 		rewritten := rewriteHTMLInline(origHTML, cidToMXC, locToMXC)
+		e.processor.log.Debug().
+			Int("cid_uploaded", pcount(cidToMXC)).
+			Int("loc_uploaded", pcount(locToMXC)).
+			Int("new_html_len", len(rewritten)).
+			Msg("Rewrote HTML with inline MXC URLs")
 		origHTML = rewritten
 	}
 
@@ -719,36 +786,63 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		content.Body = "[No text content]"
 	}
 
-	// Absolute safety limit slightly below Matrix's 64 KiB content cap
-	const hardLimit = 62 * 1024
+	// Absolute safety limit below Matrix's 64 KiB content cap, with extra margin for encryption overhead
+	// Matrix rejects events > 64 KiB after encryption. Use a conservative cap.
+	const hardLimit = 48 * 1024
 
 	// Step 1: If we have HTML, try to keep it by minifying when necessary
 	if !withinMatrixLimit(content, hardLimit) && content.FormattedBody != "" {
-		// Try bounded minification
-		if minified, ok := boundedMinifyHTML(content.FormattedBody, 40*1024); ok {
+		// Try bounded minification (more conservative target to account for encryption overhead)
+		if minified, ok := boundedMinifyHTML(content.FormattedBody, 24*1024); ok {
 			content.FormattedBody = minified
 		}
-		// If still too big, drop HTML but preserve as attachment
-		if !withinMatrixLimit(content, hardLimit) {
-			content.FormattedBody = ""
-			// Add a small notice in the body.
-			if content.Body != "" {
-				content.Body += "\n\n[Full HTML too large to send inline — attached below]"
-			} else {
-				content.Body = "[Full HTML too large to send inline — attached below]"
+			// If still too big, drop HTML but preserve as attachment
+			if !withinMatrixLimit(content, hardLimit) {
+				content.FormattedBody = ""
+				// Add a small notice in the body.
+				if content.Body != "" {
+					content.Body += "\n\n[Full HTML too large to send inline — attached below]"
+				} else {
+					content.Body = "[Full HTML too large to send inline — attached below]"
+				}
+				htmlBytes := []byte(origHTML)
+				// Prepare a user-facing notice about data handling
+				var noticeText string
+				filename := "original-email.html"
+				mimeType := "text/html"
+				// Enforce upload size limit with gzip fallback for bodies
+				if e.processor.MaxUploadBytes > 0 && len(htmlBytes) > e.processor.MaxUploadBytes && e.processor.GzipLargeBodies {
+					if gz, ok := gzipBytes(htmlBytes); ok && len(gz) <= e.processor.MaxUploadBytes {
+						htmlBytes = gz
+						filename = "original-email.html.gz"
+						mimeType = "application/gzip"
+						noticeText = "HTML body exceeded upload limit — compressed and attached as .gz for review."
+					}
+				}
+				if e.processor.MaxUploadBytes > 0 && len(htmlBytes) > e.processor.MaxUploadBytes {
+					// Still too big — send a clear notice and skip
+					n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "HTML body too large to attach; content was omitted."}
+					parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+				} else {
+					mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, filename, mimeType)
+					if err != nil {
+						e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
+						n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
+						parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+					} else {
+						if noticeText != "" {
+							n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: noticeText}
+							parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+						} else {
+							n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Full HTML was too large to send inline — attached for review."}
+							parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+						}
+						att := &event.MessageEventContent{MsgType: event.MsgFile, Body: filename, URL: mxc}
+						att.Info = &event.FileInfo{MimeType: mimeType, Size: len(htmlBytes)}
+						parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
+					}
+				}
 			}
-			htmlBytes := []byte(origHTML)
-			mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, "original-email.html", "text/html")
-			if err != nil {
-				e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
-		notice := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
-				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: notice})
-			} else {
-				att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.html", URL: mxc}
-				att.Info = &event.FileInfo{MimeType: "text/html", Size: len(htmlBytes)}
-				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
-			}
-		}
 	}
 
 	// Step 2: If still too large (plain text is huge), truncate body and attach full text.
@@ -768,15 +862,34 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 				content.Body = fullText[:maxBody] + "\n\n[Message truncated]"
 			}
 		}
-		// Attach full text
+		// Attach full text (with gzip fallback if oversized)
 		textBytes := []byte(fullText)
-		mxc, _, err := intent.UploadMedia(ctx, "", textBytes, "original-email.txt", "text/plain")
-		if err != nil {
-			e.processor.log.Warn().Err(err).Msg("Failed to upload full text, proceeding with truncated body only")
+		filename := "original-email.txt"
+		mimeType := "text/plain"
+		noticeText := "Full text was too large to send inline — attached for review."
+		if e.processor.MaxUploadBytes > 0 && len(textBytes) > e.processor.MaxUploadBytes && e.processor.GzipLargeBodies {
+			if gz, ok := gzipBytes(textBytes); ok && len(gz) <= e.processor.MaxUploadBytes {
+				textBytes = gz
+				filename = "original-email.txt.gz"
+				mimeType = "application/gzip"
+				noticeText = "Text body exceeded upload limit — compressed and attached as .gz for review."
+			}
+		}
+		if e.processor.MaxUploadBytes > 0 && len(textBytes) > e.processor.MaxUploadBytes {
+			// Still too big — clear notice and skip attaching
+			n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Text body too large to attach; only truncated body was sent."}
+			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
 		} else {
-		att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.txt", URL: mxc}
-			att.Info = &event.FileInfo{MimeType: "text/plain", Size: len(textBytes)}
-			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
+			mxc, _, err := intent.UploadMedia(ctx, "", textBytes, filename, mimeType)
+			if err != nil {
+				e.processor.log.Warn().Err(err).Msg("Failed to upload full text, proceeding with truncated body only")
+			} else {
+				n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: noticeText}
+				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+				att := &event.MessageEventContent{MsgType: event.MsgFile, Body: filename, URL: mxc}
+				att.Info = &event.FileInfo{MimeType: mimeType, Size: len(textBytes)}
+				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
+			}
 		}
 	}
 
@@ -795,7 +908,7 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 
 	// Add the main message part(s), chunking if necessary to stay well below server limits.
 	// Use a conservative per-event target to account for encryption overhead.
-	const perEventTarget = 24 * 1024
+	const perEventTarget = 16 * 1024
 	if withinMatrixLimit(content, hardLimit) && len(content.Body) <= perEventTarget {
 parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: content})
 	} else {
@@ -934,7 +1047,20 @@ func collapseWhitespace(s string) string {
 		prevWS = false
 		b.WriteRune(r)
 	}
-	return b.String()
+return b.String()
+}
+
+// gzipBytes compresses the input using gzip with default compression. Returns (gzipped, ok).
+func gzipBytes(data []byte) ([]byte, bool) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		return nil, false
+	}
+	if err := zw.Close(); err != nil {
+		return nil, false
+	}
+	return buf.Bytes(), true
 }
 
 // withinMatrixLimit marshals the content to JSON to estimate the actual event content size
@@ -1001,6 +1127,11 @@ func (e *EmailMatrixEvent) convertAttachmentToMatrix(ctx context.Context, attach
 		Str("content_type", attachment.ContentType).
 		Int64("size", attachment.Size).
 		Msg("Uploading email attachment to Matrix")
+
+	// Enforce upload size limit for general attachments
+	if e.processor.MaxUploadBytes > 0 && attachment.Size > int64(e.processor.MaxUploadBytes) {
+		return nil, fmt.Errorf("attachment exceeds upload limit (%d bytes > %d bytes)", attachment.Size, e.processor.MaxUploadBytes)
+	}
 
 	// Upload the attachment data to Matrix media repository
 	uploadResp, _, err := intent.UploadMedia(ctx, "", attachment.Data, attachment.Filename, attachment.ContentType)
