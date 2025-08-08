@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -13,6 +14,7 @@ import (
 	"net/mail"
 	"net/textproto"
 	"strings"
+	"unicode/utf8"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -606,31 +608,22 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		content.FormattedBody = origHTML
 	}
 
-	// Add email metadata to the message
+	// Ensure body isn't empty
 	if content.Body == "" {
 		content.Body = "[No text content]"
 	}
 
-	// Enforce a size budget to avoid 64 KiB Matrix event limit.
-	// We'll use a conservative threshold of ~60 KiB before encryption/overhead.
-	const sizeBudget = 60 * 1024
-	estSize := len(content.Body)
-	if content.FormattedBody != "" {
-		estSize += len(content.FormattedBody)
-	}
-	// Add a small overhead for JSON keys/structuring
-	estSize += 1024
+	// Absolute safety limit slightly below Matrix's 64 KiB content cap
+	const hardLimit = 62 * 1024
 
-	// If content appears too large, try bounded HTML minification, then fall back to plain text + HTML as attachment.
-	if estSize > sizeBudget && content.FormattedBody != "" {
-		// Attempt to minify HTML to a bounded size (e.g., ~40 KiB budget for HTML).
+	// Step 1: If we have HTML, try to keep it by minifying when necessary
+	if !withinMatrixLimit(content, hardLimit) && content.FormattedBody != "" {
+		// Try bounded minification
 		if minified, ok := boundedMinifyHTML(content.FormattedBody, 40*1024); ok {
 			content.FormattedBody = minified
-			// Re-estimate
-			estSize = len(content.Body) + len(content.FormattedBody) + 1024
 		}
-		// Still too big? Drop inline HTML and attach original HTML as a file.
-		if estSize > sizeBudget {
+		// If still too big, drop HTML but preserve as attachment
+		if !withinMatrixLimit(content, hardLimit) {
 			content.FormattedBody = ""
 			// Add a small notice in the body.
 			if content.Body != "" {
@@ -638,42 +631,103 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			} else {
 				content.Body = "[Full HTML too large to send inline — attached below]"
 			}
-			// Upload original HTML as attachment
 			htmlBytes := []byte(origHTML)
 			mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, "original-email.html", "text/html")
 			if err != nil {
-				// If upload fails, add a notice instead of failing the whole message
 				e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
 				notice := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
 				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: notice})
 			} else {
-				att := &event.MessageEventContent{
-					MsgType: event.MsgFile,
-					Body:    "original-email.html",
-					URL:     mxc,
-				}
+				att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.html", URL: mxc}
 				att.Info = &event.FileInfo{MimeType: "text/html", Size: len(htmlBytes)}
 				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
 			}
 		}
 	}
 
+	// Step 2: If still too large (plain text is huge), truncate body and attach full text.
+	if !withinMatrixLimit(content, hardLimit) {
+		fullText := content.Body
+		// Aim to leave headroom for wrapper keys etc.
+		maxBody := hardLimit - 2048
+		if maxBody < 1024 {
+			maxBody = 1024
+		}
+		trunc, did := truncateUTF8PreserveWords(fullText, maxBody)
+		if did {
+			content.Body = trunc + "\n\n[Message truncated — full text attached]"
+		} else {
+			// As a last resort, cut raw bytes safely
+			if len(fullText) > maxBody {
+				content.Body = fullText[:maxBody] + "\n\n[Message truncated]"
+			}
+		}
+		// Attach full text
+		textBytes := []byte(fullText)
+		mxc, _, err := intent.UploadMedia(ctx, "", textBytes, "original-email.txt", "text/plain")
+		if err != nil {
+			e.processor.log.Warn().Err(err).Msg("Failed to upload full text, proceeding with truncated body only")
+		} else {
+			att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.txt", URL: mxc}
+			att.Info = &event.FileInfo{MimeType: "text/plain", Size: len(textBytes)}
+			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
+		}
+	}
+
+	// After adjustments, if somehow still too big, drop formatted_body to be extra safe
+	if content.FormattedBody != "" && !withinMatrixLimit(content, hardLimit) {
+		content.FormattedBody = ""
+	}
+
 	// Add participant change notification if any
 	if participantChangeMsg := generateParticipantChangeMessage(e.emailMessage.Thread); participantChangeMsg != "" {
-		changeContent := &event.MessageEventContent{
-			MsgType: event.MsgNotice,
-			Body:    participantChangeMsg,
-		}
-		parts = append(parts, &bridgev2.ConvertedMessagePart{
-			Type:    event.EventMessage,
-			Content: changeContent,
-		})
+		changeContent := &event.MessageEventContent{MsgType: event.MsgNotice, Body: participantChangeMsg}
+		parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: changeContent})
 		// Clear the changes after processing
 		e.emailMessage.Thread.ClearParticipantChanges()
 	}
 
-	// Add the main message part
-	parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: content})
+	// Add the main message part(s), chunking if necessary to stay well below server limits.
+	// Use a conservative per-event target to account for encryption overhead.
+	const perEventTarget = 24 * 1024
+	if withinMatrixLimit(content, hardLimit) && len(content.Body) <= perEventTarget {
+parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: content})
+	} else {
+		// Split the body into multiple UTF-8 safe chunks.
+		remaining := content.Body
+		chunkIndex := 1
+		for len(remaining) > 0 {
+			// Try to cut a chunk that fits comfortably under the target
+			chunk, _ := truncateUTF8PreserveWords(remaining, perEventTarget)
+			if chunk == "" {
+				// Fallback to raw slice to make progress
+				cut := perEventTarget
+				if cut > len(remaining) { cut = len(remaining) }
+				chunk = remaining[:cut]
+			}
+chunkContent := &event.MessageEventContent{MsgType: event.MsgText, Body: chunk}
+			// Make extra sure this chunk fits JSON limit
+			for !withinMatrixLimit(chunkContent, hardLimit) && len(chunk) > 0 {
+				// Reduce chunk size by 10%
+				reduceBy := len(chunk) / 10
+				if reduceBy < 256 { reduceBy = 256 }
+				newLen := len(chunk) - reduceBy
+				if newLen <= 0 { newLen = len(chunk) - 1 }
+				chunk = chunk[:newLen]
+				chunkContent.Body = chunk
+			}
+parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: chunkContent})
+			// Advance remaining
+			if len(chunk) >= len(remaining) {
+				remaining = ""
+			} else {
+				remaining = remaining[len(chunk):]
+				// Trim leading whitespace in the next chunk to avoid odd spacing
+				remaining = strings.TrimLeft(remaining, " \n\t\r")
+			}
+			chunkIndex++
+		}
+	}
 
 	// Process attachments and upload them to Matrix
 	for _, attachment := range e.emailMessage.Attachments {
@@ -681,7 +735,6 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			parts = append(parts, attachmentPart)
 		} else {
 			e.processor.log.Warn().Err(err).Str("filename", attachment.Filename).Msg("Failed to upload attachment to Matrix")
-			// Add a fallback text message for failed attachment
 			fallbackContent := &event.MessageEventContent{MsgType: event.MsgNotice, Body: fmt.Sprintf("📎 Attachment failed to upload: %s (%s)", attachment.Filename, attachment.ContentType)}
 			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: fallbackContent})
 		}
@@ -773,6 +826,62 @@ func collapseWhitespace(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// withinMatrixLimit marshals the content to JSON to estimate the actual event content size
+func withinMatrixLimit(content *event.MessageEventContent, limit int) bool {
+	// Only include fields that are part of the event content
+	type minimal struct {
+		MsgType        event.MessageType `json:"msgtype,omitempty"`
+		Body           string            `json:"body,omitempty"`
+		Format         string            `json:"format,omitempty"`
+		FormattedBody  string            `json:"formatted_body,omitempty"`
+		URL            string            `json:"url,omitempty"`
+		Info           *event.FileInfo   `json:"info,omitempty"`
+	}
+	m := minimal{
+		MsgType:       content.MsgType,
+		Body:          content.Body,
+		Format:        string(content.Format),
+		FormattedBody: content.FormattedBody,
+		URL:           string(content.URL),
+		Info:          content.Info,
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		// Fallback: approximate using lengths
+		sz := len(content.Body) + len(content.FormattedBody)
+		if content.URL != "" {
+			sz += len(content.URL)
+		}
+		if content.Info != nil {
+			sz += 128 // rough overhead
+		}
+		return sz <= limit
+	}
+	return len(b) <= limit
+}
+
+// truncateUTF8PreserveWords trims a string to maxBytes without splitting UTF-8 runes and tries to cut at a space.
+// Returns (result, truncated)
+func truncateUTF8PreserveWords(s string, maxBytes int) (string, bool) {
+	if len(s) <= maxBytes {
+		return s, false
+	}
+	// Ensure we don't cut in the middle of a rune
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	if cut <= 0 {
+		cut = maxBytes
+	}
+	// Try to cut at last space before cut
+	lastSpace := strings.LastIndexByte(s[:cut], ' ')
+	if lastSpace > 0 && cut-lastSpace < 512 { // don't backtrack too far
+		cut = lastSpace
+	}
+	return s[:cut], true
 }
 
 
