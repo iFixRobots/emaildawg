@@ -612,6 +612,7 @@ func (c *Client) SetProcessor(processor *email.Processor) {
 
 // processNewMessages handles new email messages by fetching and processing them
 // Note: currently unused, but kept for future backfill logic.
+// nolint:unused // reserved for future backfill logic
 func (c *Client) processNewMessages(fromUID, toUID imap.UID) {
 	if c.processor == nil {
 		c.log.Warn().Msg("No email processor set, skipping message processing")

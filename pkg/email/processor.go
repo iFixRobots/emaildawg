@@ -490,9 +490,7 @@ func detectBoundary(data []byte) string {
 		if bytes.HasPrefix(line, []byte("--")) && len(line) > 2 {
 			token := string(line[2:])
 			// Skip closing boundary markers like --token--
-			if strings.HasSuffix(token, "--") {
-				token = strings.TrimSuffix(token, "--")
-			}
+			token = strings.TrimSuffix(token, "--")
 			// Validate by checking next few lines for Content-Type
 			for j := i + 1; j < len(lines) && j < i+10; j++ {
 				if bytes.HasPrefix(bytes.ToLower(bytes.TrimSpace(lines[j])), []byte("content-type:")) {
@@ -516,18 +514,6 @@ func formatIMAPAddress(addr *imap.Address) string {
 	return fmt.Sprintf("%s@%s", addr.Mailbox, addr.Host)
 }
 
-// formatIMAPAddressList converts IMAP addresses to string slice (for v1 compatibility)
-func formatIMAPAddressList(addrs []*imap.Address) []string {
-	if len(addrs) == 0 {
-		return nil
-	}
-
-	result := make([]string, len(addrs))
-	for i, addr := range addrs {
-		result[i] = formatIMAPAddress(addr)
-	}
-	return result
-}
 
 // formatIMAPAddressSlice converts IMAP v2 address slices to string slice
 func formatIMAPAddressSlice(addrs []imap.Address) []string {
@@ -555,7 +541,7 @@ func (p *Processor) isOutboundMessage(email *ParsedEmail, userLogin *bridgev2.Us
 func (p *Processor) ToMatrixEvent(ctx context.Context, emailMsg *EmailMessage, userLogin *bridgev2.UserLogin) bridgev2.RemoteMessage {
 	return &EmailMatrixEvent{
 		emailMessage: emailMsg,
-		userLogin:    *userLogin,
+		userLogin:    userLogin,
 		processor:    p,
 	}
 }
@@ -565,7 +551,7 @@ func (p *Processor) ToMatrixEvent(ctx context.Context, emailMsg *EmailMessage, u
 // EmailMatrixEvent implements bridgev2.RemoteMessage for email messages
 type EmailMatrixEvent struct {
 	emailMessage *EmailMessage
-	userLogin    bridgev2.UserLogin
+	userLogin    *bridgev2.UserLogin
 	processor    *Processor
 }
 

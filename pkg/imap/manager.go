@@ -12,7 +12,7 @@ import (
 
 // Manager handles multiple IMAP clients for different email accounts
 type Manager struct {
-	bridge    bridgev2.Bridge
+	bridge    *bridgev2.Bridge
 	log       *zerolog.Logger
 	processor *email.Processor
 
@@ -28,7 +28,7 @@ type Manager struct {
 // NewManager creates a new IMAP manager
 func NewManager(bridge *bridgev2.Bridge, log *zerolog.Logger, sanitized bool, secret string) *Manager {
 	return &Manager{
-		bridge:   *bridge,
+		bridge:   bridge,
 		log:     log,
 		sanitized: sanitized,
 		secret:   secret,

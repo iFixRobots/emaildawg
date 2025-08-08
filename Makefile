@@ -9,7 +9,7 @@ ifeq ($(UNAME_S),Darwin)
 	LIBOLM_PREFIX := $(shell brew --prefix libolm 2>/dev/null || ([ -d /opt/homebrew/opt/libolm ] && echo "/opt/homebrew/opt/libolm") || ([ -d /usr/local/opt/libolm ] && echo "/usr/local/opt/libolm") || echo "")
 	ifneq ($(LIBOLM_PREFIX),)
 		CGO_CFLAGS := -I$(LIBOLM_PREFIX)/include
-		CGO_LDFLAGS := -L$(LIBOLM_PREFIX)/lib
+		CGO_LDFLAGS := -L$(LIBOLM_PREFIX)/lib -Wl,-no_warn_duplicate_libraries
 	else
 		$(error libolm not found. Please install with: brew install libolm)
 	endif
