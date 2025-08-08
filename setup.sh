@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # EmailDawg Bridge Setup Script
-set -e
+set -euo pipefail
 
 echo "🐕 EmailDawg Bridge Setup"
 echo "========================="
@@ -37,17 +37,18 @@ fi
 
 echo "✅ bbctl found"
 
-# Generate example config
-echo "📝 Generating example configuration..."
-./mautrix-emaildawg --generate-example-config
+# Generate config skeleton via Bridge Manager (bbctl)
+mkdir -p ./data
+echo "📝 Generating bridgev2 config skeleton to ./data/config.yaml..."
+bbctl config --type bridgev2 --output ./data/config.yaml
 
 echo ""
 echo "🎉 Setup complete!"
 echo ""
 echo "Next steps:"
 echo "1. Register bridge: bbctl register --output registration.yaml sh-emaildawg"  
-echo "2. Edit config.yaml with your homeserver details"
-echo "3. Start bridge: ./mautrix-emaildawg -c config.yaml"
+echo "2. Edit ./data/config.yaml with your homeserver details"
+echo "3. Start bridge: ./mautrix-emaildawg --config ./data/config.yaml"
 echo ""
 echo "For Beeper users:"
 echo "• Use homeserver address: https://matrix.beeper.com/_hungryserv/YOUR_USERNAME"

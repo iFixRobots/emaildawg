@@ -44,16 +44,9 @@ type ProcessingConfig struct {
 }
 
 func upgradeConfig(helper up.Helper) {
-	// network.imap.* keys
-	helper.Copy(up.Int, "network", "imap", "default_timeout")
-	helper.Copy(up.Int, "network", "imap", "startup_backfill_seconds")
-	helper.Copy(up.Int, "network", "imap", "startup_backfill_max")
-	helper.Copy(up.Int, "network", "imap", "initial_idle_timeout_seconds")
-	// logging.* keys (optional)
-	helper.Copy(up.Bool, "logging", "sanitized")
-	// email_processing.* keys
-	helper.Copy(up.Int, "email_processing", "max_upload_bytes")
-	helper.Copy(up.Bool, "email_processing", "gzip_large_bodies")
+	// Only copy keys that exist in the embedded example (pkg/connector/example-config.yaml).
+	// The embedded example currently only contains imap.default_timeout at the root level.
+	helper.Copy(up.Int, "imap", "default_timeout")
 }
 
 func (ec *EmailConnector) GetConfig() (string, any, up.Upgrader) {
