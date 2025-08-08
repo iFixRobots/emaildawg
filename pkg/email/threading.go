@@ -43,26 +43,82 @@ func (thread *EmailThread) ClearParticipantChanges() {
 }
 
 // ThreadManager handles email threading detection and management
+// ThreadIndex provides persistent lookup/mapping for message IDs to thread IDs, scoped by receiver.
+type ThreadIndex interface {
+	GetThreadIDFor(receiver string, msgID string) (string, error)
+	MapThreadIDs(receiver, threadID string, msgIDs []string) error
+}
+
 type ThreadManager struct {
 	// Cache of known threads with size limit to prevent memory leaks
-	knownThreads map[string]*EmailThread
+	knownThreads map[string]*EmailThread // key: receiver|threadID
 	maxThreads   int
 	lastUsed     map[string]time.Time // For LRU eviction
 	mu           sync.RWMutex
+	index        ThreadIndex // optional persistent index
 }
 
 // NewThreadManager creates a new email thread manager
-func NewThreadManager() *ThreadManager {
+func NewThreadManager(index ThreadIndex) *ThreadManager {
 	return &ThreadManager{
 		knownThreads: make(map[string]*EmailThread),
+		index:        index,
 	}
 }
 
 // GetThreadByID returns a thread by its ThreadID if known
-func (tm *ThreadManager) GetThreadByID(threadID string) *EmailThread {
+func (tm *ThreadManager) GetThreadByID(receiver, threadID string) *EmailThread {
+	key := receiver + "|" + threadID
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
+	if th, ok := tm.knownThreads[key]; ok {
+		return th
+	}
+	// Fallback to legacy key without receiver for backward compatibility
 	return tm.knownThreads[threadID]
+}
+
+func (tm *ThreadManager) getCachedThread(receiver, threadID string) *EmailThread {
+	return tm.GetThreadByID(receiver, threadID)
+}
+
+func (tm *ThreadManager) cacheThread(receiver string, thread *EmailThread) {
+	if thread == nil || thread.ThreadID == "" {
+		return
+	}
+	key := receiver + "|" + thread.ThreadID
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.knownThreads[key] = thread
+}
+
+// CacheForReceiver exposes caching to callers (e.g., processor) to store a thread under a receiver scope.
+func (tm *ThreadManager) CacheForReceiver(receiver string, thread *EmailThread) {
+	tm.cacheThread(receiver, thread)
+}
+
+// MapThread records message IDs related to this thread into the persistent index (if configured).
+func (tm *ThreadManager) MapThread(receiver string, thread *EmailThread, email *ParsedEmail) {
+	if tm.index == nil || thread == nil || email == nil {
+		return
+	}
+	ids := make([]string, 0, 2+len(email.References))
+	if email.MessageID != "" {
+		ids = append(ids, email.MessageID)
+	}
+	if email.InReplyTo != "" {
+		ids = append(ids, email.InReplyTo)
+	}
+	for _, r := range email.References {
+		if r != "" {
+			ids = append(ids, r)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	// Best-effort persist; ignore errors to avoid blocking message delivery.
+	_ = tm.index.MapThreadIDs(receiver, thread.ThreadID, ids)
 }
 
 // ParsedEmail represents a parsed email message
@@ -129,8 +185,31 @@ func (tm *ThreadManager) ParseEmailHeaders(rawEmail string) (*ParsedEmail, error
 }
 
 // DetermineThread analyzes an email and determines which thread it belongs to
-func (tm *ThreadManager) DetermineThread(email *ParsedEmail) *EmailThread {
-	// Step 1: Check if this is a reply based on In-Reply-To header
+func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *EmailThread {
+	// Step 0: Consult persistent index if available
+	if tm.index != nil {
+		if email.InReplyTo != "" {
+			if tid, err := tm.index.GetThreadIDFor(receiver, email.InReplyTo); err == nil && tid != "" {
+				if thread := tm.getCachedThread(receiver, tid); thread != nil {
+					return tm.addToExistingThread(thread, email)
+				}
+				// Not cached: create minimal thread handle to continue; full metadata filled from this email
+				thread := &EmailThread{ThreadID: tid, Subject: email.Subject}
+				return tm.addToExistingThread(thread, email)
+			}
+		}
+		for _, refID := range email.References {
+			if tid, err := tm.index.GetThreadIDFor(receiver, refID); err == nil && tid != "" {
+				if thread := tm.getCachedThread(receiver, tid); thread != nil {
+					return tm.addToExistingThread(thread, email)
+				}
+				thread := &EmailThread{ThreadID: tid, Subject: email.Subject}
+				return tm.addToExistingThread(thread, email)
+			}
+		}
+	}
+
+	// Step 1: Check if this is a reply based on In-Reply-To header (in-memory)
 	if email.InReplyTo != "" {
 		if thread := tm.findThreadByMessageID(email.InReplyTo); thread != nil {
 			return tm.addToExistingThread(thread, email)
@@ -301,7 +380,8 @@ func (tm *ThreadManager) createNewThread(email *ParsedEmail) *EmailThread {
 		References:   email.References,
 	}
 
-	// Add to known threads
+	// Add to known threads (no receiver here; caller will cache after DetermineThread using receiver)
+	// For now, store under empty receiver to keep legacy behavior.
 	tm.knownThreads[threadID] = thread
 
 	return thread

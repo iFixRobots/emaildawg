@@ -93,8 +93,13 @@ func (p *Processor) ProcessIMAPMessage(ctx context.Context, fetchData *imapclien
 			Msg("Successfully parsed email message")
 	}
 
-	// Step 1: Determine thread membership
-	thread := p.threadManager.DetermineThread(parsedEmail)
+	// Step 1: Determine thread membership (scoped by receiver)
+	receiver := string(userLogin.ID)
+	thread := p.threadManager.DetermineThread(receiver, parsedEmail)
+	// Cache thread under this receiver to enable room lookup later
+	p.threadManager.CacheForReceiver(receiver, thread)
+	// Persist the mapping of message IDs to thread for reliable reply resolution across restarts
+	p.threadManager.MapThread(receiver, thread, parsedEmail)
 	if thread == nil {
 		return nil, fmt.Errorf("failed to determine thread for message %s", parsedEmail.MessageID)
 	}

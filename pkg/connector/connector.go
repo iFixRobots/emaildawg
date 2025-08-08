@@ -25,6 +25,7 @@ type EmailConnector struct {
 	ThreadManager *email.ThreadManager
 	Processor     *email.Processor
 	DB            *EmailAccountQuery
+	ThreadIndex   *EmailThreadIndexQuery
 }
 
 var (
@@ -105,19 +106,24 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	if err := ec.DB.CreateTable(ctx); err != nil {
 		bridge.Log.Fatal().Err(err).Msg("Failed to create email_accounts table")
 	}
-	
+	// Create thread index table and helper
+	ec.ThreadIndex = &EmailThreadIndexQuery{DB: bridge.DB}
+	if err := ec.ThreadIndex.CreateTable(ctx); err != nil {
+		bridge.Log.Fatal().Err(err).Msg("Failed to create email_thread_index table")
+	}
+
 	// Initialize managers
 	logger := bridge.Log.With().Str("component", "imap").Logger()
-ec.IMAPManager = imap.NewManager(bridge, &logger, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
+	ec.IMAPManager = imap.NewManager(bridge, &logger, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
 	
 	roomLogger := bridge.Log.With().Str("component", "matrix").Logger()
 	ec.RoomManager = matrix.NewRoomManager(&roomLogger)
 	
-	ec.ThreadManager = email.NewThreadManager()
+	ec.ThreadManager = email.NewThreadManager(ec.ThreadIndex)
 	
 	// Initialize email processor and wire it to the IMAP manager
 	processorLogger := bridge.Log.With().Str("component", "email_processor").Logger()
-ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
+	ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
 	// Apply processing config
 	if ec.Config.Processing.MaxUploadBytes > 0 {
 		ec.Processor.MaxUploadBytes = ec.Config.Processing.MaxUploadBytes
@@ -191,8 +197,8 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 
 	// If we have richer thread info, build the room using RoomManager
 	if ec.ThreadManager != nil && ec.RoomManager != nil {
-		if thread := ec.ThreadManager.GetThreadByID(threadID); thread != nil {
-return ec.RoomManager.GetChatInfoForThread(ctx, thread, userLogin)
+		if thread := ec.ThreadManager.GetThreadByID(string(userLogin.ID), threadID); thread != nil {
+			return ec.RoomManager.GetChatInfoForThread(ctx, thread, userLogin)
 		}
 	}
 
