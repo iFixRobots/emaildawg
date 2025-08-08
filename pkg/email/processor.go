@@ -200,7 +200,6 @@ func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textCo
 		if html != "" && htmlContent == "" {
 			htmlContent = html
 		}
-		// If both found, we can stop early
 		if textContent != "" && htmlContent != "" {
 			break
 		}
@@ -219,47 +218,47 @@ func (p *Processor) parseMIMEContent(data []byte) (textContent, htmlContent stri
 	// Try to parse as a complete email message
 	msg, err := mail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
-		// If not a complete message, treat as raw text
+		// If not a complete message, heuristically detect multipart boundary
+		if boundary := detectBoundary(data); boundary != "" {
+			return p.parseMultipartContent(bytes.NewReader(data), boundary)
+		}
+		// Fallback as raw text
 		return string(data), ""
 	}
-
-	// Content-Transfer-Encoding for the top-level entity
-	cte := strings.ToLower(msg.Header.Get("Content-Transfer-Encoding"))
 
 	// Check Content-Type header
 	contentType := msg.Header.Get("Content-Type")
 	if contentType == "" {
-		// No content type, assume plain text
-		decoded := decodeBody(msg.Body, cte)
-		body, _ := io.ReadAll(decoded)
-		return string(body), ""
+		// No content type: try boundary heuristic
+		raw, _ := io.ReadAll(msg.Body)
+		if boundary := detectBoundary(raw); boundary != "" {
+			return p.parseMultipartContent(bytes.NewReader(raw), boundary)
+		}
+		// Fallback: plain text
+		return string(raw), ""
 	}
 
 	// Parse media type
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		// Fallback to plain text
-		decoded := decodeBody(msg.Body, cte)
-		body, _ := io.ReadAll(decoded)
+		body, _ := io.ReadAll(msg.Body)
 		return string(body), ""
 	}
 
 	switch {
 	case strings.HasPrefix(mediaType, "text/plain"):
-		decoded := decodeBody(msg.Body, cte)
-		body, _ := io.ReadAll(decoded)
+		body, _ := io.ReadAll(msg.Body)
 		return string(body), ""
 	case strings.HasPrefix(mediaType, "text/html"):
-		decoded := decodeBody(msg.Body, cte)
-		body, _ := io.ReadAll(decoded)
+		body, _ := io.ReadAll(msg.Body)
 		return "", string(body)
 	case strings.HasPrefix(mediaType, "multipart/"):
 		// Handle multipart messages
 		return p.parseMultipartContent(msg.Body, params["boundary"])
 	default:
 		// Unknown content type, try to read as text
-		decoded := decodeBody(msg.Body, cte)
-		body, _ := io.ReadAll(decoded)
+		body, _ := io.ReadAll(msg.Body)
 		return string(body), ""
 	}
 }
@@ -449,7 +448,7 @@ func (p *Processor) extractReferencesFromHeaders(buf *imapclient.FetchMessageBuf
 
 // decodeBody wraps the reader according to Content-Transfer-Encoding
 func decodeBody(r io.Reader, cte string) io.Reader {
-	switch cte {
+	switch strings.ToLower(cte) {
 	case "quoted-printable":
 		return quotedprintable.NewReader(r)
 	case "base64":
@@ -457,6 +456,30 @@ func decodeBody(r io.Reader, cte string) io.Reader {
 	default:
 		return r
 	}
+}
+
+// detectBoundary tries to find a MIME boundary token in a raw body without headers
+func detectBoundary(data []byte) string {
+	// Look for a line starting with --token and followed soon by a Content-Type header
+	// This is a best-effort heuristic for bodies that are raw multipart payloads
+	lines := bytes.Split(data, []byte("\n"))
+	for i := 0; i < len(lines); i++ {
+		line := bytes.TrimRight(lines[i], "\r")
+		if bytes.HasPrefix(line, []byte("--")) && len(line) > 2 {
+			token := string(line[2:])
+			// Skip closing boundary markers like --token--
+			if strings.HasSuffix(token, "--") {
+				token = strings.TrimSuffix(token, "--")
+			}
+			// Validate by checking next few lines for Content-Type
+			for j := i + 1; j < len(lines) && j < i+10; j++ {
+				if bytes.HasPrefix(bytes.ToLower(bytes.TrimSpace(lines[j])), []byte("content-type:")) {
+					return token
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // formatIMAPAddress converts an IMAP address to string format
@@ -691,12 +714,8 @@ func (e *EmailMatrixEvent) getMessageTypeForAttachment(contentType string) event
 
 // emailToGhostID converts an email address to a Matrix ghost user ID
 func emailToGhostID(email string) networkid.UserID {
-	// Clean email for use in Matrix ID
-	cleanEmail := strings.ToLower(email)
-	cleanEmail = strings.ReplaceAll(cleanEmail, "@", "_at_")
-	cleanEmail = strings.ReplaceAll(cleanEmail, ".", "_dot_")
-	
-	return networkid.UserID(fmt.Sprintf("email_%s", cleanEmail))
+	addr := strings.TrimSpace(email)
+	return networkid.UserID(fmt.Sprintf("email:%s", addr))
 }
 
 // generateParticipantChangeMessage creates a timeline message for participant changes

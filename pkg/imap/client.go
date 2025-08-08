@@ -28,9 +28,9 @@ func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 	
 	// Don't log credentials but log everything else
 	if strings.Contains(strings.ToUpper(data), "LOGIN") {
-		w.logger.Debug().Str("imap_data", "[LOGIN COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
+		w.logger.Trace().Str("imap_data", "[LOGIN COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
 	} else {
-		w.logger.Debug().Str("imap_data", strings.TrimSpace(data)).Msg("[IMAP PROTOCOL] Data exchange")
+		w.logger.Trace().Str("imap_data", strings.TrimSpace(data)).Msg("[IMAP PROTOCOL] Data exchange")
 	}
 	
 	return len(p), nil
@@ -514,6 +514,20 @@ func (c *Client) checkNewMessages() error {
 	// Get the UIDs from search results
 	newUIDs = searchResult.AllUIDs()
 	
+	// Filter out any UIDs that are not strictly newer than our last processed UID
+	{
+		c.mu.RLock()
+		last := c.lastUID
+		c.mu.RUnlock()
+		filtered := make([]imap.UID, 0, len(newUIDs))
+		for _, uid := range newUIDs {
+			if uid > last {
+				filtered = append(filtered, uid)
+			}
+		}
+		newUIDs = filtered
+	}
+	
 	if len(newUIDs) == 0 {
 		c.log.Info().Msg("No new messages found")
 		return nil
@@ -559,6 +573,7 @@ func (c *Client) SetProcessor(processor *email.Processor) {
 }
 
 // processNewMessages handles new email messages by fetching and processing them
+// Note: currently unused, but kept for future backfill logic.
 func (c *Client) processNewMessages(fromUID, toUID imap.UID) {
 	if c.processor == nil {
 		c.log.Warn().Msg("No email processor set, skipping message processing")

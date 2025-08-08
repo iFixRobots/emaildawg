@@ -68,19 +68,21 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 
 	// Set up power levels to make room read-only for email participants
 	powerLevels := &bridgev2.PowerLevelOverrides{
-		EventsDefault: ptr.Ptr(101), // Require level 101 to send messages
-		StateDefault:  ptr.Ptr(101), // Require level 101 to change state
-		Ban:           ptr.Ptr(101), // Require level 101 to ban
-		Kick:          ptr.Ptr(101), // Require level 101 to kick
-		Invite:        ptr.Ptr(101), // Require level 101 to invite
-		Redact:        ptr.Ptr(101), // Require level 101 to redact
+		// Allow sending normal messages by default so ghost users can post email content.
+		// Keep state changes restricted to the bridge account.
+		EventsDefault: ptr.Ptr(0),
+		StateDefault:  ptr.Ptr(101),
+		Ban:           ptr.Ptr(101),
+		Kick:          ptr.Ptr(101),
+		Invite:        ptr.Ptr(101),
+		Redact:        ptr.Ptr(101),
 		Events: map[event.Type]int{
 			event.StateRoomName:   101,
-			event.StateTopic:      101, 
+			event.StateTopic:      101,
 			event.StateRoomAvatar: 101,
-			event.EventMessage:    101, // Block all message sending except from bridge
-			event.EventReaction:   101, // Block reactions
-			event.EventRedaction:  101, // Block redactions
+			// Do not override EventMessage to 101 – leave it at EventsDefault (0)
+			event.EventReaction:   101,
+			event.EventRedaction:  101,
 		},
 	}
 
@@ -141,12 +143,9 @@ func (rm *RoomManager) formatRoomName(subject string) string {
 
 // emailToGhostID converts an email address to a Matrix ghost user ID
 func (rm *RoomManager) emailToGhostID(email string) networkid.UserID {
-	// Clean email for use in Matrix ID
-	cleanEmail := strings.ToLower(email)
-	cleanEmail = strings.ReplaceAll(cleanEmail, "@", "_at_")
-	cleanEmail = strings.ReplaceAll(cleanEmail, ".", "_dot_")
-	
-	return networkid.UserID(fmt.Sprintf("email_%s", cleanEmail))
+	// Use a stable scheme that preserves the actual address for display mapping
+	addr := strings.TrimSpace(email)
+	return networkid.UserID(fmt.Sprintf("email:%s", addr))
 }
 
 // formatGhostDisplayName creates a friendly display name for email ghosts
