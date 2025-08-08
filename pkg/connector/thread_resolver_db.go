@@ -41,21 +41,25 @@ func (r *DBThreadMetadataResolver) ResolveThreadID(receiver, messageID string) (
 	}
 	ctx := context.Background()
 
-	// Candidate queries. We try in order. Any SQL error is treated as a miss and we move on.
-	// 1) Common layout: message(network, remote_id, receiver, portal_id)
-	if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, mid, receiver); tid != "" {
-		return normalizeThreadID(tid), true
-	}
-	// 2) Without receiver column
-	if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ?`, r.Network, mid); tid != "" {
-		return normalizeThreadID(tid), true
-	}
-	// 3) Alternate table name: messages
-	if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, mid, receiver); tid != "" {
-		return normalizeThreadID(tid), true
-	}
-	if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ?`, r.Network, mid); tid != "" {
-		return normalizeThreadID(tid), true
+	// Try both raw and namespaced remote IDs to be robust.
+	candidates := []string{mid, "email:" + mid}
+	for _, rid := range candidates {
+		// Candidate queries. We try in order. Any SQL error is treated as a miss and we move on.
+		// 1) Common layout: message(network, remote_id, receiver, portal_id)
+		if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, rid, receiver); tid != "" {
+			return normalizeThreadID(tid), true
+		}
+		// 2) Without receiver column
+		if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ?`, r.Network, rid); tid != "" {
+			return normalizeThreadID(tid), true
+		}
+		// 3) Alternate table name: messages
+		if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, rid, receiver); tid != "" {
+			return normalizeThreadID(tid), true
+		}
+		if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ?`, r.Network, rid); tid != "" {
+			return normalizeThreadID(tid), true
+		}
 	}
 
 	if r.Log != nil {
