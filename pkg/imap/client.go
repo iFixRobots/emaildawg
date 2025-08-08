@@ -331,6 +331,7 @@ func (c *Client) StartIDLE() error {
 
 	// Test IDLE capability before starting the loop
 	// This will fail immediately if server thinks IDLE is already running
+	c.log.Trace().Msg("Probing IDLE capability with a short-lived test call")
 	testIdleCmd, err := c.client.Idle()
 	if err != nil {
 		c.mu.Lock()
@@ -348,6 +349,8 @@ func (c *Client) StartIDLE() error {
 	// Immediately close the test IDLE and start the actual monitoring loop
 	if err := testIdleCmd.Close(); err != nil {
 		c.log.Warn().Err(err).Msg("Failed to close test IDLE command")
+	} else {
+		c.log.Trace().Msg("Closed test IDLE successfully; proceeding to start monitoring loop")
 	}
 
 	// Start IDLE monitoring in goroutine
@@ -510,6 +513,7 @@ func (c *Client) checkNewMessages() error {
 	// If this is the first sync (lastUID=0), just get current state and mark as up-to-date
 	if currentLastUID == 0 {
 		c.log.Info().Msg("First sync detected (lastUID=0), setting up to only sync NEW messages going forward")
+		c.log.Warn().Msg("First sync policy will SKIP any messages already in INBOX. Consider backfill if needed.")
 		// Get the current highest UID to mark as our starting point
 		c.log.Debug().Msg("[IMAP] Executing STATUS INBOX command to get UIDNext")
 		statusCmd := c.client.Status("INBOX", &imap.StatusOptions{
@@ -540,6 +544,7 @@ statusData, err := statusCmd.Wait()
 		c.mu.Unlock()
 		
 		c.log.Info().Uint32("last_uid", uint32(currentHighestUID)).Msg("First sync complete - bridge is now up-to-date, will only sync NEW messages")
+		c.log.Trace().Uint32("uidnext", uint32(statusData.UIDNext)).Uint32("baseline_uid", uint32(currentHighestUID)).Msg("Established baseline UID at startup")
 		return nil // No need to search for existing messages
 	}
 	

@@ -13,6 +13,7 @@ import (
 	"mime/quotedprintable"
 	"net/mail"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 	"time"
@@ -405,46 +406,49 @@ func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) [
 		}
 
 		// Check if this part is an attachment
-		contentDisposition := part.Header.Get("Content-Disposition")
-		if strings.Contains(strings.ToLower(contentDisposition), "attachment") {
-			// Read attachment data
-			data, err := io.ReadAll(part)
-			part.Close()
-			if err != nil {
-				continue
-			}
-
-			// Extract filename
-			filename := "attachment"
-			if _, params, err := mime.ParseMediaType(contentDisposition); err == nil {
-				if fn := params["filename"]; fn != "" {
-					filename = fn
-				}
-			}
-
-			// Get content type
-			contentType := part.Header.Get("Content-Type")
-			if contentType == "" {
-				contentType = "application/octet-stream"
-			}
-
-			attachment := &EmailAttachment{
-				Filename:    filename,
-				ContentType: contentType,
-				Size:        int64(len(data)),
-				Data:        data,
-			}
-
-			attachments = append(attachments, attachment)
-			p.log.Debug().
-				Str("filename", filename).
-				Str("content_type", contentType).
-				Int64("size", attachment.Size).
-				Msg("Extracted email attachment")
-		} else {
-			// Not an attachment, just close the part
-			part.Close()
+contentDisposition := part.Header.Get("Content-Disposition")
+		dispLower := strings.ToLower(contentDisposition)
+		// Read part body always if it could be attachment or inline resource
+		dataBytes, err := io.ReadAll(part)
+		part.Close()
+		if err != nil {
+			continue
 		}
+		// Extract filename if present
+		filename := "attachment"
+		if _, params, err := mime.ParseMediaType(contentDisposition); err == nil {
+			if fn := params["filename"]; fn != "" {
+				filename = fn
+			}
+		}
+		// Get content type
+		contentType := part.Header.Get("Content-Type")
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		// Extract inline headers
+		contentID := normalizeCIDHeader(part.Header.Get("Content-ID"))
+		contentLocation := strings.TrimSpace(part.Header.Get("Content-Location"))
+		isInline := strings.Contains(dispLower, "inline")
+		attachment := &EmailAttachment{
+			Filename:        filename,
+			ContentType:     contentType,
+			Size:            int64(len(dataBytes)),
+			Data:            dataBytes,
+			ContentID:       contentID,
+			ContentLocation: normalizeContentLocation(contentLocation),
+			Disposition:     strings.ToLower(strings.TrimSpace(strings.Split(contentDisposition, ";")[0])),
+			IsInline:        isInline || contentID != "" || contentLocation != "",
+		}
+		attachments = append(attachments, attachment)
+		p.log.Debug().
+			Str("filename", filename).
+			Str("content_type", contentType).
+			Int64("size", attachment.Size).
+			Bool("inline", attachment.IsInline).
+			Str("cid", attachment.ContentID).
+			Str("cl", attachment.ContentLocation).
+			Msg("Extracted email part")
 	}
 
 	return attachments
@@ -595,14 +599,67 @@ func (e *EmailMatrixEvent) AddLogContext(c zerolog.Context) zerolog.Context {
 func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
 	var parts []*bridgev2.ConvertedMessagePart
 
+	// Preprocess inline images for HTML
+	usedInline := make(map[int]bool)
+	cidToMXC := make(map[string]string)
+	locToMXC := make(map[string]string)
+	origHTML := e.emailMessage.HTMLContent
+	if origHTML != "" {
+		// Build index of inline-capable attachments
+		for _, att := range e.emailMessage.Attachments {
+			if att == nil {
+				continue
+			}
+			if att.ContentID != "" {
+				cidToMXC[att.ContentID] = "" // mark as candidate
+			}
+			if att.ContentLocation != "" {
+				locToMXC[att.ContentLocation] = ""
+			}
+		}
+		// Find referenced CIDs and content-locations, upload and map to MXC
+		referencedCIDs := findCIDsInHTML(origHTML)
+		referencedLocs := findContentLocationsInHTML(origHTML)
+		// Upload CIDs
+		for cid := range referencedCIDs {
+			idx := findAttachmentByCID(e.emailMessage.Attachments, cid)
+			if idx >= 0 {
+				att := e.emailMessage.Attachments[idx]
+				if cidToMXC[cid] == "" {
+					mxc, _, err := intent.UploadMedia(ctx, "", att.Data, bestFilename(att, cid), att.ContentType)
+					if err == nil {
+						cidToMXC[cid] = string(mxc)
+						usedInline[idx] = true
+					}
+				}
+			}
+		}
+		// Upload content-locations
+		for loc := range referencedLocs {
+			idx := findAttachmentByContentLocation(e.emailMessage.Attachments, loc)
+			if idx >= 0 {
+				att := e.emailMessage.Attachments[idx]
+				if locToMXC[loc] == "" {
+					mxc, _, err := intent.UploadMedia(ctx, "", att.Data, bestFilename(att, loc), att.ContentType)
+					if err == nil {
+						locToMXC[loc] = string(mxc)
+						usedInline[idx] = true
+					}
+				}
+			}
+		}
+		// Rewrite HTML with MXC URLs
+		rewritten := rewriteHTMLInline(origHTML, cidToMXC, locToMXC)
+		origHTML = rewritten
+	}
+
 	// Create the main text message content
 	content := &event.MessageEventContent{
 		MsgType: event.MsgText,
 		Body:    e.emailMessage.TextContent,
 	}
 
-	origHTML := e.emailMessage.HTMLContent
-	// Add HTML formatting if available
+// Add HTML formatting if available
 	if origHTML != "" && origHTML != e.emailMessage.TextContent {
 		content.Format = event.FormatHTML
 		content.FormattedBody = origHTML
@@ -635,7 +692,7 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, "original-email.html", "text/html")
 			if err != nil {
 				e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
-				notice := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
+		notice := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
 				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: notice})
 			} else {
 				att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.html", URL: mxc}
@@ -668,7 +725,7 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		if err != nil {
 			e.processor.log.Warn().Err(err).Msg("Failed to upload full text, proceeding with truncated body only")
 		} else {
-			att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.txt", URL: mxc}
+		att := &event.MessageEventContent{MsgType: event.MsgFile, Body: "original-email.txt", URL: mxc}
 			att.Info = &event.FileInfo{MimeType: "text/plain", Size: len(textBytes)}
 			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: att})
 		}
@@ -729,8 +786,11 @@ parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, C
 		}
 	}
 
-	// Process attachments and upload them to Matrix
-	for _, attachment := range e.emailMessage.Attachments {
+// Process attachments and upload them to Matrix (skip those used inline)
+	for idx, attachment := range e.emailMessage.Attachments {
+		if usedInline[idx] {
+			continue
+		}
 		if attachmentPart, err := e.convertAttachmentToMatrix(ctx, attachment, intent); err == nil {
 			parts = append(parts, attachmentPart)
 		} else {
@@ -945,6 +1005,145 @@ func (e *EmailMatrixEvent) getMessageTypeForAttachment(contentType string) event
 }
 
 // Helper functions for email processing
+
+// normalizeCIDHeader cleans a Content-ID header value by trimming <> and lowercasing
+func normalizeCIDHeader(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "<")
+	s = strings.TrimSuffix(s, ">")
+	return strings.ToLower(s)
+}
+
+func normalizeCIDRef(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(strings.ToLower(s), "cid:")
+	s = strings.TrimPrefix(s, "<")
+	s = strings.TrimSuffix(s, ">")
+	return s
+}
+
+func normalizeContentLocation(s string) string {
+	s = strings.TrimSpace(s)
+	return s
+}
+
+// findCIDsInHTML finds cid: references in img/src and css url()
+func findCIDsInHTML(html string) map[string]struct{} {
+	res := make(map[string]struct{})
+	// src\s*=\s*['\"]?cid:([^'\"\s)]+)
+	reImg := regexp.MustCompile(`(?i)src\s*=\s*['\"]?cid:([^'\"\s)>]+)`) 
+	matches := reImg.FindAllStringSubmatch(html, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			res[normalizeCIDRef(m[1])] = struct{}{}
+		}
+	}
+	// url\(cid:...)
+	reCSS := regexp.MustCompile(`(?i)url\(\s*cid:([^\)\s]+)\s*\)`) 
+	matches = reCSS.FindAllStringSubmatch(html, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			res[normalizeCIDRef(m[1])] = struct{}{}
+		}
+	}
+	return res
+}
+
+// findContentLocationsInHTML finds Content-Location references used in src attributes
+func findContentLocationsInHTML(html string) map[string]struct{} {
+	res := make(map[string]struct{})
+	// src\s*=\s*['\"]([^'\"]+)['\"] and not cid: or http(s)
+	re := regexp.MustCompile(`(?i)src\s*=\s*['\"]([^'\"]+)['\"]`)
+	matches := re.FindAllStringSubmatch(html, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			val := strings.TrimSpace(m[1])
+			low := strings.ToLower(val)
+			if strings.HasPrefix(low, "cid:") || strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") || strings.HasPrefix(low, "data:") {
+				continue
+			}
+			res[normalizeContentLocation(val)] = struct{}{}
+		}
+	}
+	return res
+}
+
+func findAttachmentByCID(atts []*EmailAttachment, cid string) int {
+	for i, a := range atts {
+		if a != nil && a.ContentID != "" && a.ContentID == cid {
+			return i
+		}
+	}
+	return -1
+}
+
+func findAttachmentByContentLocation(atts []*EmailAttachment, loc string) int {
+	for i, a := range atts {
+		if a != nil && a.ContentLocation != "" && strings.EqualFold(a.ContentLocation, loc) {
+			return i
+		}
+	}
+	return -1
+}
+
+func bestFilename(att *EmailAttachment, fallback string) string {
+	if att.Filename != "" {
+		return att.Filename
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "inline"
+}
+
+// rewriteHTMLInline replaces cid: and content-location references with mxc urls
+func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[string]string) string {
+	out := html
+	// Replace cid: in src and CSS url()
+	reImg := regexp.MustCompile(`(?i)(src\\s*=\\s*['\\"])cid:([^'\\"\\s)\u003e]+)`) 
+	out = reImg.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reImg.FindStringSubmatch(m)
+		if len(subs) > 2 {
+			prefix := subs[1]
+			cidRef := subs[2]
+			cid := normalizeCIDRef(cidRef)
+			if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
+				return prefix + mxc
+			}
+		}
+		return m
+	})
+	reCSS := regexp.MustCompile(`(?i)url\(\s*cid:([^\)\s]+)\s*\)`) 
+	out = reCSS.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reCSS.FindStringSubmatch(m)
+		if len(subs) > 1 {
+			cid := normalizeCIDRef(subs[1])
+			if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
+				return "url(" + mxc + ")"
+			}
+		}
+		return m
+	})
+	// Replace content-location src references
+	reLoc := regexp.MustCompile(`(?i)src\s*=\s*(['\"])([^'\"]+)\1`)
+	out = reLoc.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reLoc.FindStringSubmatch(m)
+		if len(subs) > 2 {
+			val := subs[2]
+			low := strings.ToLower(val)
+			if strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") || strings.HasPrefix(low, "data:") || strings.HasPrefix(low, "cid:") {
+				return m
+			}
+			key := normalizeContentLocation(val)
+			if mxc, ok := locToMXC[key]; ok && mxc != "" {
+				quote := subs[1]
+				return "src=" + quote + mxc + quote
+			}
+		}
+		return m
+	})
+	return out
+}
 
 // emailToGhostID converts an email address to a Matrix ghost user ID
 func emailToGhostID(email string) networkid.UserID {

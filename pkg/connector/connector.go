@@ -3,7 +3,10 @@ package connector
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 
+	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
@@ -56,7 +59,30 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 			PseudonymSecret: "",
 		},
 	}
-	
+
+	// Allow environment overrides for verbose logging
+	// EMAILDAWG_LOG_LEVEL: trace|debug|info|warn|error
+	if lvl := strings.ToLower(os.Getenv("EMAILDAWG_LOG_LEVEL")); lvl != "" {
+		switch lvl {
+		case "trace":
+			zerolog.SetGlobalLevel(zerolog.TraceLevel)
+		case "debug":
+			zerolog.SetGlobalLevel(zerolog.DebugLevel)
+		case "info":
+			zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		case "warn":
+			zerolog.SetGlobalLevel(zerolog.WarnLevel)
+		case "error":
+			zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+		}
+	} else {
+		// Default to maximum verbosity for analysis
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	}
+	if san := strings.ToLower(os.Getenv("EMAILDAWG_LOG_SANITIZED")); san == "false" || san == "0" || san == "no" {
+		ec.Config.Logging.Sanitized = false
+	}
+
 	// Set global instance for command access
 	ConnectorInstance = ec
 	

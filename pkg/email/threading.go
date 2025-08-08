@@ -11,10 +11,15 @@ import (
 // EmailAttachment represents an email attachment (forward declaration)
 // The actual struct is defined in processor.go to avoid circular imports
 type EmailAttachment struct {
-	Filename    string
-	ContentType string
-	Size        int64
-	Data        []byte
+	Filename        string
+	ContentType     string
+	Size            int64
+	Data            []byte
+	// Inline-related metadata
+	ContentID       string // normalized: no <>, lowercase
+	ContentLocation string // as in MIME header, normalized path-like string
+	Disposition     string // inline or attachment
+	IsInline        bool   // derived: Disposition == inline or referenced in HTML
 }
 
 // EmailThread represents an email conversation thread
