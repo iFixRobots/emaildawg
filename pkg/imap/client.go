@@ -110,6 +110,9 @@ type EmailProvider struct {
 	OAuth    bool
 }
 
+// Reference the processNewMessages method so linters see it as used while it's kept for future backfill logic.
+var _ = (*Client).processNewMessages
+
 var CommonProviders = map[string]EmailProvider{
 	"gmail.com": {
 		Name: "Gmail",

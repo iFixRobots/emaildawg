@@ -319,9 +319,18 @@ func (p *Processor) parseMultipartContent(body io.Reader, boundary string) (text
 
 		// Check Content-Type of this part
 		contentType := part.Header.Get("Content-Type")
-		mediaType, _, _ := mime.ParseMediaType(contentType)
+		mediaType, params, _ := mime.ParseMediaType(contentType)
 
 		switch {
+		case strings.HasPrefix(mediaType, "multipart/"):
+			// Recurse into nested multiparts (e.g., multipart/alternative inside multipart/mixed)
+			childText, childHTML := p.parseMultipartContent(bytes.NewReader(partData), params["boundary"])
+			if textContent == "" && childText != "" {
+				textContent = childText
+			}
+			if htmlContent == "" && childHTML != "" {
+				htmlContent = childHTML
+			}
 		case strings.HasPrefix(mediaType, "text/plain"):
 			if textContent == "" {
 				textContent = string(partData)
@@ -409,45 +418,81 @@ func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) [
 			continue
 		}
 
-		// Check if this part is an attachment
-contentDisposition := part.Header.Get("Content-Disposition")
-		dispLower := strings.ToLower(contentDisposition)
-		// Read part body always if it could be attachment or inline resource
+		contentDisposition := part.Header.Get("Content-Disposition")
+		dispLower := strings.ToLower(strings.TrimSpace(contentDisposition))
+
+		// Read part body
 		dataBytes, err := io.ReadAll(part)
 		part.Close()
 		if err != nil {
 			continue
 		}
-		// Extract filename if present
-		filename := "attachment"
-		if _, params, err := mime.ParseMediaType(contentDisposition); err == nil {
-			if fn := params["filename"]; fn != "" {
+
+		// Determine content type and parameters
+		ct := part.Header.Get("Content-Type")
+		mediaType, params, _ := mime.ParseMediaType(ct)
+		if ct == "" {
+			ct = "application/octet-stream"
+			mediaType = ct
+		}
+
+		// Skip multipart container parts: recurse to find real parts
+		if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+			childBoundary := params["boundary"]
+			attachments = append(attachments, p.parseMultipartAttachments(bytes.NewReader(dataBytes), childBoundary)...)
+			continue
+		}
+
+		// Extract potential filename
+		filename := ""
+		if _, cdParams, err := mime.ParseMediaType(contentDisposition); err == nil {
+			if fn := cdParams["filename"]; fn != "" {
 				filename = fn
 			}
 		}
-		// Get content type
-		contentType := part.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/octet-stream"
-		}
-		// Extract inline headers
+
+		// Inline-related headers
 		contentID := normalizeCIDHeader(part.Header.Get("Content-ID"))
 		contentLocation := strings.TrimSpace(part.Header.Get("Content-Location"))
 		isInline := strings.Contains(dispLower, "inline")
+
+		// Decide if this is a real attachment to expose:
+		// - Always include if disposition is attachment
+		// - Include inline images/files if they have Content-ID or Content-Location (for HTML inlining)
+		// - Otherwise, skip common body parts like text/plain and text/html without attachment disposition
+		isText := strings.HasPrefix(strings.ToLower(mediaType), "text/")
+		isAttachmentDisposition := strings.Contains(dispLower, "attachment")
+		isInlineReference := contentID != "" || contentLocation != ""
+		if !isAttachmentDisposition && !isInlineReference {
+			// Skip non-attachment, non-inline-reference parts (likely body text)
+			if isText {
+				continue
+			}
+			// If no filename and no inline ref, skip generic parts
+			if filename == "" {
+				continue
+			}
+		}
+
+		// Default filename if still empty
+		if filename == "" {
+			filename = "attachment"
+		}
+
 		attachment := &EmailAttachment{
 			Filename:        filename,
-			ContentType:     contentType,
+			ContentType:     ct,
 			Size:            int64(len(dataBytes)),
 			Data:            dataBytes,
 			ContentID:       contentID,
 			ContentLocation: normalizeContentLocation(contentLocation),
 			Disposition:     strings.ToLower(strings.TrimSpace(strings.Split(contentDisposition, ";")[0])),
-			IsInline:        isInline || contentID != "" || contentLocation != "",
+			IsInline:        isInline || isInlineReference,
 		}
 		attachments = append(attachments, attachment)
 		p.log.Debug().
 			Str("filename", filename).
-			Str("content_type", contentType).
+			Str("content_type", ct).
 			Int64("size", attachment.Size).
 			Bool("inline", attachment.IsInline).
 			Str("cid", attachment.ContentID).
