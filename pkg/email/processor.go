@@ -682,8 +682,18 @@ func (e *EmailMatrixEvent) AddLogContext(c zerolog.Context) zerolog.Context {
 		Str("email_from", e.emailMessage.From)
 }
 
-func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
+func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (cm *bridgev2.ConvertedMessage, err error) {
 	var parts []*bridgev2.ConvertedMessagePart
+	// Global safety net: never drop the whole message on panic. Emit a placeholder notice instead.
+	defer func() {
+		if r := recover(); r != nil {
+			e.processor.log.Error().Any("panic", r).Msg("Email conversion panicked — sending placeholder notice")
+			n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "⚠️ Your email could not be fully processed by the bridge. The original message may have been dropped. Please report this to the bridge maintainers."}
+			parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+			cm = &bridgev2.ConvertedMessage{Parts: parts}
+			err = nil
+		}
+	}()
 
 	// Preprocess inline images for HTML
 	usedInline := make(map[int]bool)
@@ -1309,8 +1319,15 @@ func bestFilename(att *EmailAttachment, fallback string) string {
 // Returns (rewrittenHTML, replaced, failed)
 func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridgev2.MatrixAPI, html string) (string, int, int) {
 	out := html
-	reDataImg := regexp.MustCompile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*['\"]`)
-	reDataCSS := regexp.MustCompile(`(?i)url\(\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
+	reDataImg, err := regexp.Compile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*['\"]`)
+	if err != nil {
+		// If the regex fails to compile for any reason, don't panic; just skip externalization.
+		return out, 0, 0
+	}
+	reDataCSS, err := regexp.Compile(`(?i)url\(\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
+	if err != nil {
+		return out, 0, 0
+	}
 	replaced := 0
 	failed := 0
 	// Replace <img src="data:...">
