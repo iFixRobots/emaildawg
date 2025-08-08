@@ -49,20 +49,29 @@ type ThreadIndex interface {
 	MapThreadIDs(receiver, threadID string, msgIDs []string) error
 }
 
+// ThreadMetadataResolver allows consulting external metadata to resolve a thread ID
+// from a message ID for a specific receiver (e.g., bridgev2 metadata).
+// Return (threadID, true) if found; otherwise return ("", false).
+type ThreadMetadataResolver interface {
+	ResolveThreadID(receiver, messageID string) (string, bool)
+}
+
 type ThreadManager struct {
 	// Cache of known threads with size limit to prevent memory leaks
 	knownThreads map[string]*EmailThread // key: receiver|threadID
 	maxThreads   int
 	lastUsed     map[string]time.Time // For LRU eviction
 	mu           sync.RWMutex
-	index        ThreadIndex // optional persistent index
+	index        ThreadIndex           // optional persistent index
+	resolver     ThreadMetadataResolver // optional external resolver
 }
 
 // NewThreadManager creates a new email thread manager
-func NewThreadManager(index ThreadIndex) *ThreadManager {
+func NewThreadManager(index ThreadIndex, resolver ThreadMetadataResolver) *ThreadManager {
 	return &ThreadManager{
 		knownThreads: make(map[string]*EmailThread),
 		index:        index,
+		resolver:     resolver,
 	}
 }
 
@@ -186,7 +195,28 @@ func (tm *ThreadManager) ParseEmailHeaders(rawEmail string) (*ParsedEmail, error
 
 // DetermineThread analyzes an email and determines which thread it belongs to
 func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *EmailThread {
-	// Step 0: Consult persistent index if available
+	// Step 0a: Consult external resolver if available
+	if tm.resolver != nil {
+		if email.InReplyTo != "" {
+			if tid, ok := tm.resolver.ResolveThreadID(receiver, email.InReplyTo); ok && tid != "" {
+				if thread := tm.getCachedThread(receiver, tid); thread != nil {
+					return tm.addToExistingThread(thread, email)
+				}
+				thread := &EmailThread{ThreadID: tid, Subject: email.Subject}
+				return tm.addToExistingThread(thread, email)
+			}
+		}
+		for _, refID := range email.References {
+			if tid, ok := tm.resolver.ResolveThreadID(receiver, refID); ok && tid != "" {
+				if thread := tm.getCachedThread(receiver, tid); thread != nil {
+					return tm.addToExistingThread(thread, email)
+				}
+				thread := &EmailThread{ThreadID: tid, Subject: email.Subject}
+				return tm.addToExistingThread(thread, email)
+			}
+		}
+	}
+	// Step 0b: Consult persistent index if available
 	if tm.index != nil {
 		if email.InReplyTo != "" {
 			if tid, err := tm.index.GetThreadIDFor(receiver, email.InReplyTo); err == nil && tid != "" {
