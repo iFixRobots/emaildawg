@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -199,8 +200,20 @@ func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+// If we think we're connected, validate liveness before early return
 	if c.connected {
-		return nil
+		if err := c.testConnectionNoLock(); err != nil {
+			c.log.Warn().Err(err).Msg("Detected dead IMAP connection during Connect - resetting state")
+			// Force-clear state so we can rebuild below
+			if c.client != nil {
+				c.client.Close()
+				c.client = nil
+			}
+			c.connected = false
+			c.idling = false
+		} else {
+			return nil
+		}
 	}
 
 	// Ensure clean state before connecting
@@ -415,7 +428,7 @@ func (c *Client) runIDLE() error {
 	}
 
 	// Create IDLE command
-	idleCmd, err := cli.Idle()
+idleCmd, err := cli.Idle()
 	if err != nil {
 		// If IDLE fails due to "already running", this indicates server-side state desync
 		// Force a reconnection to clean up the connection state
@@ -427,6 +440,16 @@ func (c *Client) runIDLE() error {
 			default:
 			}
 			return fmt.Errorf("IDLE state desync detected, reconnection triggered: %w", err)
+		}
+		if isHardNetErr(err) {
+			c.mu.Lock()
+			if c.client != nil {
+				c.client.Close()
+				c.client = nil
+			}
+			c.connected = false
+			c.idling = false
+			c.mu.Unlock()
 		}
 		return fmt.Errorf("failed to start IDLE: %w", err)
 	}
@@ -492,9 +515,19 @@ func (c *Client) checkNewMessages() error {
 		statusCmd := c.client.Status("INBOX", &imap.StatusOptions{
 			UIDNext: true,
 		})
-		statusData, err := statusCmd.Wait()
+statusData, err := statusCmd.Wait()
 		if err != nil {
 			c.log.Error().Err(err).Msg("Failed to get INBOX status")
+			if isHardNetErr(err) {
+				c.mu.Lock()
+				if c.client != nil {
+					c.client.Close()
+					c.client = nil
+				}
+				c.connected = false
+				c.idling = false
+				c.mu.Unlock()
+			}
 			return fmt.Errorf("failed to get INBOX status: %w", err)
 		}
 		
@@ -536,13 +569,23 @@ func (c *Client) checkNewMessages() error {
 	// Wait with timeout
 	var searchResult *imap.SearchData
 	select {
-	case response := <-searchDone:
+case response := <-searchDone:
 		if response.err != nil {
 			c.log.Error().Err(response.err).Msg("Failed to search for new messages")
+			if isHardNetErr(response.err) {
+				c.mu.Lock()
+				if c.client != nil {
+					c.client.Close()
+					c.client = nil
+				}
+				c.connected = false
+				c.idling = false
+				c.mu.Unlock()
+			}
 			return fmt.Errorf("failed to search for new messages: %w", response.err)
 		}
 		searchResult = response.result
-	case <-time.After(30 * time.Second):
+case <-time.After(30 * time.Second):
 		c.log.Error().Msg("IMAP search timed out after 30 seconds")
 		return fmt.Errorf("IMAP search timed out")
 	}
@@ -813,12 +856,17 @@ func (c *Client) reconnectClient() error {
 	// Disconnect first
 	c.Disconnect()
 	
-	// Calculate exponential backoff (min 5s, max 5min)
-	backoffDuration := time.Duration(c.failureCount+1) * 5 * time.Second
-	if backoffDuration > 5*time.Minute {
-		backoffDuration = 5 * time.Minute
+	// Calculate exponential backoff (min 5s, max 5min) with jitter (+/-20%)
+	base := time.Duration(c.failureCount+1) * 5 * time.Second
+	if base > 5*time.Minute {
+		base = 5 * time.Minute
 	}
-	
+	jitterFraction := 0.2
+	jitter := time.Duration(float64(base) * (rand.Float64()*2*jitterFraction - jitterFraction))
+	backoffDuration := base + jitter
+	if backoffDuration < 0 {
+		backoffDuration = base // avoid negative
+	}
 	c.log.Info().Dur("backoff", backoffDuration).Int("failure_count", c.failureCount).Msg("Waiting before reconnection attempt")
 	time.Sleep(backoffDuration)
 	
@@ -879,6 +927,11 @@ func (c *Client) Shutdown() {
 	
 	// Disconnect
 	c.Disconnect()
+}
+
+// Reconnect is a public wrapper to trigger a full IMAP reconnection
+func (c *Client) Reconnect() error {
+	return c.reconnectClient()
 }
 
 // IsConnected returns whether the client is currently connected
@@ -968,6 +1021,17 @@ func (c *Client) TestConnection() error {
 	// This will fail if the connection is stale or if there are server-side issues
 	noopCmd := client.Noop()
 	if err := noopCmd.Wait(); err != nil {
+		// If this looks like a hard network error, force-clear state so callers can reconnect
+		if isHardNetErr(err) {
+			c.mu.Lock()
+			if c.client != nil {
+				c.client.Close()
+				c.client = nil
+			}
+			c.connected = false
+			c.idling = false
+			c.mu.Unlock()
+		}
 		return fmt.Errorf("NOOP command failed: %w", err)
 	}
 	
@@ -982,9 +1046,8 @@ func (c *Client) safeStartIDLE() error {
 	go func() {
 		// Try to start IDLE with connection reset capability
 		if err := c.TestConnection(); err != nil {
-			c.log.Warn().Err(err).Msg("Connection test failed during IDLE restart")
-			// Try reconnecting
-			if reconErr := c.Connect(); reconErr != nil {
+			c.log.Warn().Err(err).Msg("Connection test failed during IDLE restart - performing full reconnect")
+			if reconErr := c.reconnectClient(); reconErr != nil {
 				done <- fmt.Errorf("failed to reconnect for IDLE restart: %w", reconErr)
 				return
 			}
@@ -1009,7 +1072,7 @@ func (c *Client) safeStartIDLE() error {
 		done <- nil // Success
 	}()
 	
-	// Wait with timeout
+// Wait with timeout
 	select {
 	case err := <-done:
 		return err
@@ -1017,6 +1080,28 @@ func (c *Client) safeStartIDLE() error {
 		c.log.Error().Msg("IDLE restart timed out after 10 seconds")
 		return fmt.Errorf("IDLE restart timed out")
 	}
+}
+
+// testConnectionNoLock assumes external synchronization if needed and only checks current handle liveness.
+func (c *Client) testConnectionNoLock() error {
+	if !c.connected || c.client == nil {
+		return fmt.Errorf("IMAP client not connected")
+	}
+	return c.client.Noop().Wait()
+}
+
+// isHardNetErr classifies hard network errors that require a full reconnect
+func isHardNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection reset by peer") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "unexpected eof") ||
+		strings.Contains(s, "eof") ||
+		strings.Contains(s, "i/o timeout")
 }
 
 // resetConnection forces a complete disconnection and reconnection to clear server-side state

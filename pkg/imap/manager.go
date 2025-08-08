@@ -3,6 +3,7 @@ package imap
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
@@ -23,6 +24,9 @@ type Manager struct {
 	// Map of userID+email -> IMAP client
 	clients map[string]*Client
 	mu      sync.RWMutex
+	
+	// Watchdog control
+	watchdogInterval time.Duration
 }
 
 // NewManager creates a new IMAP manager
@@ -33,6 +37,7 @@ func NewManager(bridge *bridgev2.Bridge, log *zerolog.Logger, sanitized bool, se
 		sanitized: sanitized,
 		secret:   secret,
 		clients: make(map[string]*Client),
+		watchdogInterval: 60 * time.Second,
 	}
 }
 
@@ -86,12 +91,15 @@ func (m *Manager) AddAccount(login *bridgev2.UserLogin, email, username, passwor
 		return fmt.Errorf("failed to start IDLE monitoring: %w", err)
 	}
 	
-	// Store client
-	m.clients[clientKey] = client
-	
-	m.log.Info().Str("user", login.UserMXID.String()).Str("email", email).Msg("Added and started monitoring email account")
-	
-	return nil
+// Store client
+m.clients[clientKey] = client
+
+// Start watchdog for this client
+m.startWatchdog(login.UserMXID.String(), email, client)
+
+m.log.Info().Str("user", login.UserMXID.String()).Str("email", email).Msg("Added and started monitoring email account")
+
+return nil
 }
 
 // RemoveAccount removes and stops monitoring an email account
@@ -197,6 +205,8 @@ func (m *Manager) RegisterClient(userMXID, email string, client *Client) {
 	
 	// Store the client for status reporting
 	m.clients[clientKey] = client
+	// Start watchdog for this client
+	m.startWatchdog(userMXID, email, client)
 	
 	m.log.Debug().Str("user", userMXID).Str("email", email).Msg("Registered IMAP client for status reporting")
 }
@@ -204,6 +214,36 @@ func (m *Manager) RegisterClient(userMXID, email string, client *Client) {
 // getClientKey generates a unique key for storing clients
 func (m *Manager) getClientKey(userMXID, email string) string {
 	return fmt.Sprintf("%s:%s", userMXID, email)
+}
+
+// startWatchdog launches a periodic health check for a client
+func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
+	interval := m.watchdogInterval
+	if interval == 0 {
+		interval = 60 * time.Second
+	}
+	logger := m.log.With().Str("user", userMXID).Str("email", email).Str("component", "imap_watchdog").Logger()
+	go func() {
+		Ticker := time.NewTicker(interval)
+		defer Ticker.Stop()
+		for range Ticker.C {
+			// Snapshot connected state
+			if !client.IsConnected() {
+				continue
+			}
+			if err := client.TestConnection(); err != nil {
+				logger.Warn().Err(err).Msg("Health probe failed, triggering reconnect")
+				if recErr := client.Reconnect(); recErr != nil {
+					logger.Error().Err(recErr).Msg("Reconnect failed from watchdog")
+					continue
+				}
+				// Restart IDLE after reconnect
+				if err := client.StartIDLE(); err != nil {
+					logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
+				}
+			}
+		}
+	}()
 }
 
 // AccountStatus represents the status of an email account

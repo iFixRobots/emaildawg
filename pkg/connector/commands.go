@@ -493,14 +493,11 @@ func fnReconnect(ce *commands.Event) {
 		ce.Reply("🔌 Reconnecting **%s**...", emailAddr)
 		if client, ok := targetLogin.Client.(*EmailClient); ok {
 			if client.IMAPClient != nil {
-				// Disconnect first
-				client.IMAPClient.Disconnect()
-				// Reconnect
-				if err := client.IMAPClient.Connect(); err != nil {
+				if err := client.IMAPClient.Reconnect(); err != nil {
 					ce.Reply("❌ Reconnection failed for **%s**: %s", emailAddr, err.Error())
 					return
 				}
-				// Restart IDLE
+				// Start IDLE after successful reconnect
 				if err := client.IMAPClient.StartIDLE(); err != nil {
 					ce.Reply("⚠️ Reconnected **%s** but IDLE failed to start: %s", emailAddr, err.Error())
 				} else {
@@ -520,14 +517,10 @@ func fnReconnect(ce *commands.Event) {
 
 	for _, login := range logins {
 		if client, ok := login.Client.(*EmailClient); ok && client.IMAPClient != nil {
-			// Disconnect first
-			client.IMAPClient.Disconnect()
-			// Reconnect
-			if err := client.IMAPClient.Connect(); err != nil {
+			if err := client.IMAPClient.Reconnect(); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
 				continue
 			}
-			// Restart IDLE
 			if err := client.IMAPClient.StartIDLE(); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: IDLE failed - %s", client.Email, err.Error()))
 			} else {
