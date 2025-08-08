@@ -79,6 +79,15 @@ logging:
     sanitized: true             # When true, redact PII (subjects, message-ids, emails, raw protocol)
     pseudonym_secret: ""        # Optional HMAC key for stable pseudonyms/hashes in logs
 
+# Email processing behavior and limits
+email_processing:
+    # Maximum size in bytes for a single media upload by the bridge.
+    # Set to 0 to disable the check. Note: This is separate from the homeserver media limit.
+    max_upload_bytes: 10485760   # 10 MiB default
+    # If true, when the HTML or text body is too large to send inline, the bridge
+    # will gzip the full content and attach it as .gz (with a clear notice).
+    gzip_large_bodies: true
+
     # The following are example global writer settings used by the bridge framework.
     # Keep or remove as appropriate for your environment.
     min_level: debug

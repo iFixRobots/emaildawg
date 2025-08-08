@@ -51,15 +51,21 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Initialize config with default values
 	ec.Config = Config{
-		IMAP: IMAPConfig{
-			DefaultTimeout:            30,
-			StartupBackfillSeconds:    180,
-			StartupBackfillMax:        25,
-			InitialIdleTimeoutSeconds: 3,
+		Network: NetworkConfig{
+			IMAP: IMAPConfig{
+				DefaultTimeout:            30,
+				StartupBackfillSeconds:    180,
+				StartupBackfillMax:        25,
+				InitialIdleTimeoutSeconds: 3,
+			},
 		},
 		Logging: LoggingConfig{
 			Sanitized:       true,
 			PseudonymSecret: "",
+		},
+		Processing: ProcessingConfig{
+			MaxUploadBytes:  10 * 1024 * 1024,
+			GzipLargeBodies: true,
 		},
 	}
 
@@ -102,7 +108,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Initialize managers
 	logger := bridge.Log.With().Str("component", "imap").Logger()
-	ec.IMAPManager = imap.NewManager(bridge, &logger, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
+ec.IMAPManager = imap.NewManager(bridge, &logger, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
 	
 	roomLogger := bridge.Log.With().Str("component", "matrix").Logger()
 	ec.RoomManager = matrix.NewRoomManager(&roomLogger)
@@ -111,7 +117,12 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	
 	// Initialize email processor and wire it to the IMAP manager
 	processorLogger := bridge.Log.With().Str("component", "email_processor").Logger()
-	ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
+ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
+	// Apply processing config
+	if ec.Config.Processing.MaxUploadBytes > 0 {
+		ec.Processor.MaxUploadBytes = ec.Config.Processing.MaxUploadBytes
+	}
+	ec.Processor.GzipLargeBodies = ec.Config.Processing.GzipLargeBodies
 	ec.IMAPManager.SetProcessor(ec.Processor)
 	
 	// Add commands

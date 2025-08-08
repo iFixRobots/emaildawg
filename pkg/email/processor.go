@@ -696,6 +696,23 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		Int("html_len", len(origHTML)).
 		Msg("Converting email to Matrix event")
 	if origHTML != "" {
+		// Early lightweight minification to save space without harming formatting
+		if len(origHTML) > 30*1024 {
+			origHTML = lightMinifyHTML(origHTML)
+		}
+		// Externalize data: URLs to MXC and rewrite references
+		dataURIsReplaced, replacedCount, failedCount := e.externalizeDataURIs(ctx, intent, origHTML)
+		if replacedCount > 0 || failedCount > 0 {
+			if replacedCount > 0 {
+				n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: fmt.Sprintf("Optimized inline resources: moved %d embedded data URLs to media.", replacedCount)}
+				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+			}
+			if failedCount > 0 {
+				n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: fmt.Sprintf("Some embedded data URLs were too large or invalid and were omitted (%d).", failedCount)}
+				parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+			}
+		}
+		origHTML = dataURIsReplaced
 		// Build index of inline-capable attachments
 		for _, att := range e.emailMessage.Attachments {
 			if att == nil {
@@ -770,9 +787,15 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 	}
 
 	// Create the main text message content
+	bodyText := e.emailMessage.TextContent
+	// Avoid duplicating large content when HTML is present: summarize body
+	if origHTML != "" && len(bodyText) > 2048 {
+		short, _ := truncateUTF8PreserveWords(bodyText, 1000)
+		bodyText = short + "\n\n[HTML version included below]"
+	}
 	content := &event.MessageEventContent{
 		MsgType: event.MsgText,
-		Body:    e.emailMessage.TextContent,
+		Body:    bodyText,
 	}
 
 // Add HTML formatting if available
@@ -1282,6 +1305,70 @@ func bestFilename(att *EmailAttachment, fallback string) string {
 	return "inline"
 }
 
+// externalizeDataURIs finds data: URLs in HTML, uploads them to media, and rewrites to mxc URLs.
+// Returns (rewrittenHTML, replaced, failed)
+func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridgev2.MatrixAPI, html string) (string, int, int) {
+	out := html
+	reDataImg := regexp.MustCompile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+);base64,([a-z0-9+/=]+)\s*\2`)
+	reDataCSS := regexp.MustCompile(`(?i)url\(\s*data:([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
+	replaced := 0
+	failed := 0
+	// Replace <img src="data:...">
+	out = reDataImg.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reDataImg.FindStringSubmatch(m)
+		if len(subs) < 5 { return m }
+		attr := subs[1]
+		quote := subs[2]
+		mimeType := strings.ToLower(subs[3])
+		b64 := subs[4]
+		data, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			failed++
+			return m
+		}
+		if e.processor.MaxUploadBytes > 0 && len(data) > e.processor.MaxUploadBytes {
+			failed++
+			return m
+		}
+		name := "inline"
+		if strings.HasPrefix(mimeType, "image/") {
+			name = "inline." + strings.TrimPrefix(mimeType, "image/")
+		}
+		mxc, _, err := intent.UploadMedia(ctx, "", data, name, mimeType)
+		if err != nil {
+			failed++
+			return m
+		}
+		replaced++
+		return attr + quote + string(mxc) + quote
+	})
+	// Replace CSS url(data:...)
+	out = reDataCSS.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reDataCSS.FindStringSubmatch(m)
+		if len(subs) < 3 { return m }
+		mimeType := strings.ToLower(subs[1])
+		b64 := subs[2]
+		data, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			failed++
+			return m
+		}
+		if e.processor.MaxUploadBytes > 0 && len(data) > e.processor.MaxUploadBytes {
+			failed++
+			return m
+		}
+		name := "inline"
+		mxc, _, err := intent.UploadMedia(ctx, "", data, name, mimeType)
+		if err != nil {
+			failed++
+			return m
+		}
+		replaced++
+		return "url(" + string(mxc) + ")"
+	})
+return out, replaced, failed
+}
+
 // rewriteHTMLInline replaces cid: and content-location references with mxc urls
 func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[string]string) string {
 	out := html
@@ -1342,6 +1429,15 @@ func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[str
 		})
 	}
 return out
+}
+
+// lightMinifyHTML removes comments and collapses whitespace conservatively to preserve formatting fidelity.
+func lightMinifyHTML(s string) string {
+	before := len(s)
+	s = removeHTMLComments(s)
+	s = collapseWhitespace(s)
+	_ = before // keep variable for potential future metrics
+	return s
 }
 
 // simpleHTMLToText converts basic HTML into readable plaintext.
