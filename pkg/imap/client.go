@@ -912,18 +912,27 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID) error {
 		// Queue the event with the bridge framework
 		if !c.login.QueueRemoteEvent(matrixEvent).Success {
 			if c.sanitized {
-				c.log.Error().Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).Msg("Failed to queue remote event")
+				c.log.Error().
+					Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).
+					Str("subject_hash", logging.HashHMAC(logging.BoundAndClean(emailMessage.Subject, 256), c.secret, 10)).
+					Msg("Failed to queue remote event")
 			} else {
-				c.log.Error().Str("message_id", string(emailMessage.MessageID)).Msg("Failed to queue remote event")
+				c.log.Error().
+					Str("message_id", string(emailMessage.MessageID)).
+					Str("subject", logging.BoundAndClean(emailMessage.Subject, 256)).
+					Msg("Failed to queue remote event")
 			}
 		} else {
 			if c.sanitized {
 				c.log.Info().
 					Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).
-					Str("subject_hash", logging.HashHMAC(emailMessage.Subject, c.secret, 10)).
+					Str("subject_hash", logging.HashHMAC(logging.BoundAndClean(emailMessage.Subject, 256), c.secret, 10)).
 					Msg("Successfully queued email message")
 			} else {
-				c.log.Info().Str("message_id", string(emailMessage.MessageID)).Str("subject", emailMessage.Subject).Msg("Successfully queued email message")
+				c.log.Info().
+					Str("message_id", string(emailMessage.MessageID)).
+					Str("subject", logging.BoundAndClean(emailMessage.Subject, 256)).
+					Msg("Successfully queued email message")
 			}
 		}
 	}

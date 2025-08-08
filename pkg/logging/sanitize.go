@@ -32,7 +32,14 @@ func MaskEmail(s string) string {
 }
 
 func HashHMAC(s, secret string, n int) string {
-	h := hmac.New(sha256.New, []byte(secret))
+	// If secret is empty, avoid producing predictable hashes silently.
+	// Fall back to hashing with a fixed label and input, which is still deterministic but
+	// separates from the intended secret-based HMAC usage. Callers should set a secret.
+	key := []byte(secret)
+	if len(key) == 0 {
+		key = []byte("emaildawg-hash")
+	}
+	h := hmac.New(sha256.New, key)
 	h.Write([]byte(s))
 	d := h.Sum(nil)
 	hexStr := hex.EncodeToString(d)
@@ -77,6 +84,25 @@ var emailRE = regexp.MustCompile(`(?i)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]
 
 func RedactEmailsIn(s string) string {
 	return emailRE.ReplaceAllStringFunc(s, MaskEmail)
+}
+
+// BoundAndClean trims control characters and bounds the length of arbitrary strings for safe logging.
+func BoundAndClean(s string, max int) string {
+	s = strings.TrimSpace(s)
+	// Remove control characters
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 32 || r == 127 {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if max > 0 && len(out) > max {
+		return out[:max]
+	}
+	return out
 }
 
 func max(a, b int) int {
