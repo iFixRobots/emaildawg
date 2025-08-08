@@ -52,7 +52,10 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	// Initialize config with default values
 	ec.Config = Config{
 		IMAP: IMAPConfig{
-			DefaultTimeout: 30,
+			DefaultTimeout:            30,
+			StartupBackfillSeconds:    180,
+			StartupBackfillMax:        25,
+			InitialIdleTimeoutSeconds: 3,
 		},
 		Logging: LoggingConfig{
 			Sanitized:       true,

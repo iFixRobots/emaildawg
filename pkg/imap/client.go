@@ -66,7 +66,14 @@ type Client struct {
 	stopIdle   chan struct{}
 	reconnect  chan struct{}
 	
-	// Bridge integration
+	// Startup behavior
+	startupBackfillSeconds   int
+	startupBackfillMax       int
+	initialIdleTimeout       time.Duration
+	idleInterval             time.Duration
+	firstIdleCycle           bool
+	 
+ 	// Bridge integration
 	login      *bridgev2.UserLogin // Can be nil for testing
 	log        *zerolog.Logger
 	processor  *email.Processor
@@ -137,7 +144,7 @@ var CommonProviders = map[string]EmailProvider{
 }
 
 // NewClient creates a new IMAP client for the given email account
-func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string) (*Client, error) {
+func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string, backfillSeconds int, backfillMax int, initialIdleTimeoutSeconds int) (*Client, error) {
 	// Auto-detect provider settings
 	domain := strings.ToLower(strings.Split(email, "@")[1])
 	provider, ok := CommonProviders[domain]
@@ -163,7 +170,12 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 	// Create context for proper cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	
-	return &Client{
+	// Derive timeouts
+	initIdle := 30 * time.Second
+	if initialIdleTimeoutSeconds > 0 {
+		initIdle = time.Duration(initialIdleTimeoutSeconds) * time.Second
+	}
+return &Client{
 		Email:        email,
 		Host:         host,
 		Port:         port,
@@ -182,6 +194,12 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		// Context management
 		ctx:          ctx,
 		cancel:       cancel,
+		// Startup behavior
+		startupBackfillSeconds: backfillSeconds,
+		startupBackfillMax:     backfillMax,
+		initialIdleTimeout:     initIdle,
+		idleInterval:           30 * time.Second,
+		firstIdleCycle:         true,
 	}, nil
 }
 
@@ -329,6 +347,14 @@ func (c *Client) StartIDLE() error {
 		return fmt.Errorf("failed to select INBOX: %w", err)
 	}
 
+	// Establish immediate baseline and optional backfill BEFORE starting IDLE
+	if err := c.primeBaselineAndBackfill(); err != nil {
+		c.mu.Lock()
+		c.idling = false
+		c.mu.Unlock()
+		return fmt.Errorf("failed to prime baseline/backfill: %w", err)
+	}
+
 	// Test IDLE capability before starting the loop
 	// This will fail immediately if server thinks IDLE is already running
 	c.log.Trace().Msg("Probing IDLE capability with a short-lived test call")
@@ -463,7 +489,12 @@ idleCmd, err := cli.Idle()
 	// Solution: Use a timeout-based approach that periodically checks for new messages
 	// This gives us responsiveness while still using IDLE properly
 	
-	timeoutTimer := time.NewTimer(30 * time.Second) // Check every 30 seconds
+	cycleTimeout := c.idleInterval
+	if c.firstIdleCycle && c.initialIdleTimeout > 0 {
+		cycleTimeout = c.initialIdleTimeout
+		c.firstIdleCycle = false
+	}
+	timeoutTimer := time.NewTimer(cycleTimeout)
 	defer timeoutTimer.Stop()
 
 	for {
@@ -487,6 +518,64 @@ idleCmd, err := cli.Idle()
 			return nil // This will cause idleLoop to restart IDLE
 		}
 	}
+}
+
+// primeBaselineAndBackfill sets lastUID to UIDNEXT-1 and optionally backfills recent messages
+func (c *Client) primeBaselineAndBackfill() error {
+statusCmd := c.client.Status("INBOX", &imap.StatusOptions{UIDNext: true})
+	statusData, err := statusCmd.Wait()
+	if err != nil {
+		return fmt.Errorf("failed to get INBOX status during prime: %w", err)
+	}
+	baseline := statusData.UIDNext - 1
+	c.mu.Lock()
+	c.lastUID = baseline
+	c.mu.Unlock()
+	c.log.Info().Uint32("uidnext", uint32(statusData.UIDNext)).Uint32("baseline_uid", uint32(baseline)).Msg("Established baseline UID at startup")
+	if c.startupBackfillSeconds <= 0 || c.startupBackfillMax <= 0 {
+		c.log.Trace().Msg("Startup backfill disabled or not configured")
+		return nil
+	}
+	since := time.Now().Add(-time.Duration(c.startupBackfillSeconds) * time.Second)
+	uidSet := imap.UIDSet{}
+	uidSet.AddRange(baseline+1, 0)
+	criteria := imap.SearchCriteria{Since: since, UID: []imap.UIDSet{uidSet}}
+	c.log.Info().Time("since", since).Int("max", c.startupBackfillMax).Msg("Running startup backfill search")
+searchCmd := c.client.UIDSearch(&criteria, nil)
+	searchData, err := searchCmd.Wait()
+	if err != nil {
+		return fmt.Errorf("startup backfill search failed: %w", err)
+	}
+	uids := searchData.AllUIDs()
+	if len(uids) == 0 {
+		c.log.Info().Msg("Startup backfill: no messages found")
+		return nil
+	}
+	if len(uids) > c.startupBackfillMax {
+		uids = uids[len(uids)-c.startupBackfillMax:]
+	}
+	c.log.Info().Int("count", len(uids)).Msg("Startup backfill: processing messages")
+	var highest imap.UID = baseline
+	for _, uid := range uids {
+		if uid <= baseline {
+			continue
+		}
+		if err := c.processMessage(context.Background(), uid); err != nil {
+			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Startup backfill: failed to process message")
+			continue
+		}
+		if uid > highest {
+			highest = uid
+		}
+	}
+	if highest > baseline {
+		c.mu.Lock()
+		c.lastUID = highest
+		c.mu.Unlock()
+		c.log.Info().Uint32("last_uid", uint32(highest)).Msg("Startup backfill: updated lastUID after processing")
+	}
+	c.log.Info().Msg("IMAP ready for new messages after baseline/backfill")
+	return nil
 }
 
 // checkNewMessages fetches and processes new messages

@@ -121,6 +121,9 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		&logger,
 		ec.Config.Logging.Sanitized,
 		ec.Config.Logging.PseudonymSecret,
+		ec.Config.IMAP.StartupBackfillSeconds,
+		ec.Config.IMAP.StartupBackfillMax,
+		ec.Config.IMAP.InitialIdleTimeoutSeconds,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
@@ -173,30 +176,30 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 	
 	ec.isConnected.Store(true)
 	
-	// Start IMAP IDLE monitoring with retry logic
+	// Start IMAP IDLE monitoring with retry logic (includes baseline/backfill)
 	if err := ec.startIDLEWithRetry(); err != nil {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE after retries")
-		// Set bridge state to indicate IDLE failure
+		// Set bridge state to indicate IDLE failure and do NOT mark as connected
 		state := status.BridgeState{
 			StateEvent: status.StateUnknownError,
 			Error:      EmailConnectionFailed,
 			Info: map[string]any{
-				"go_error": err.Error(),
+				"go_error":  err.Error(),
 				"error_type": "IDLE_startup_failed",
 			},
 		}
 		ec.UserLogin.BridgeState.Send(state)
-		// Continue without IDLE - bridge can still do periodic sync
+		return
 	}
 	
-	// Start background loops
+	// Start background loops now that IDLE is running and baseline/backfill are done
 	ec.startLoops()
 	
-	// Send connected state
+	// Send connected state only after readiness is complete
 	state := status.BridgeState{StateEvent: status.StateConnected}
 	ec.UserLogin.BridgeState.Send(state)
 	
-	ec.UserLogin.Log.Info().Msg("Email client connected successfully")
+	ec.UserLogin.Log.Info().Msg("Email client connected successfully and ready (baseline/backfill complete)")
 }
 
 func (ec *EmailClient) Disconnect() {

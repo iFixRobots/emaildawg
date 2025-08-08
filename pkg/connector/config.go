@@ -18,7 +18,10 @@ type Config struct {
 type IMAPConfig struct {
 	// IMAP connection settings will be configured per-user via DM commands
 	// rather than in the global config file
-	DefaultTimeout int `yaml:"default_timeout"`
+	DefaultTimeout            int `yaml:"default_timeout"`
+	StartupBackfillSeconds    int `yaml:"startup_backfill_seconds"`
+	StartupBackfillMax        int `yaml:"startup_backfill_max"`
+	InitialIdleTimeoutSeconds int `yaml:"initial_idle_timeout_seconds"`
 }
 
 type LoggingConfig struct {
@@ -29,12 +32,11 @@ type LoggingConfig struct {
 
 func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Int, "imap", "default_timeout")
+	helper.Copy(up.Int, "imap", "startup_backfill_seconds")
+	helper.Copy(up.Int, "imap", "startup_backfill_max")
+	helper.Copy(up.Int, "imap", "initial_idle_timeout_seconds")
 	// These are optional and safe to ignore if not present
 	helper.Copy(up.Bool, "logging", "sanitized")
-	// Older util may not expose up.String; copy as up.Str if available
-	// If not, this is a best-effort noop in older versions.
-	// Use Copy with type name "string" via up.FieldType, but the util exposes helpers only.
-	// We'll keep only sanitized mandatory upgrade.
 }
 
 func (ec *EmailConnector) GetConfig() (string, any, up.Upgrader) {
