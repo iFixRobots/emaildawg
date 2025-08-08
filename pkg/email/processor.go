@@ -1309,8 +1309,8 @@ func bestFilename(att *EmailAttachment, fallback string) string {
 // Returns (rewrittenHTML, replaced, failed)
 func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridgev2.MatrixAPI, html string) (string, int, int) {
 	out := html
-	reDataImg := regexp.MustCompile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+);base64,([a-z0-9+/=]+)\s*\2`)
-	reDataCSS := regexp.MustCompile(`(?i)url\(\s*data:([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
+	reDataImg := regexp.MustCompile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*['\"]`)
+	reDataCSS := regexp.MustCompile(`(?i)url\(\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
 	replaced := 0
 	failed := 0
 	// Replace <img src="data:...">
