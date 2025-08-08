@@ -230,7 +230,11 @@ func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textCo
 		}
 	}
 
-	// If no text content found, provide a fallback
+	// If we don't have text/plain but we do have HTML, derive a simple plaintext fallback
+	if textContent == "" && htmlContent != "" {
+		textContent = simpleHTMLToText(htmlContent)
+	}
+	// If still no text content found, provide a fallback
 	if textContent == "" {
 		textContent = "[No readable text content found]"
 	}
@@ -1161,7 +1165,36 @@ func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[str
 			return m
 		})
 	}
-	return out
+return out
+}
+
+// simpleHTMLToText converts basic HTML into readable plaintext.
+// It strips script/style, removes tags, collapses whitespace, and decodes common entities.
+func simpleHTMLToText(s string) string {
+	// Remove script and style blocks
+	s = stripTagContent(s, "script")
+	s = stripTagContent(s, "style")
+	// Replace <br> and <p> with newlines to preserve structure
+	reBR := regexp.MustCompile(`(?is)<\s*br\s*/?>`)
+	s = reBR.ReplaceAllString(s, "\n")
+	reP := regexp.MustCompile(`(?is)<\s*/?p\s*>`)
+	s = reP.ReplaceAllString(s, "\n")
+	// Strip remaining tags
+	reTags := regexp.MustCompile(`(?is)<[^>]+>`) 
+	s = reTags.ReplaceAllString(s, "")
+	// Decode a few common HTML entities
+	replacer := strings.NewReplacer(
+		"&nbsp;", " ",
+		"&amp;", "&",
+		"&lt;", "<",
+		"&gt;", ">",
+		"&quot;", "\"",
+		"&#39;", "'",
+	)
+	s = replacer.Replace(s)
+	// Collapse whitespace
+	s = strings.TrimSpace(collapseWhitespace(s))
+	return s
 }
 
 // emailToGhostID converts an email address to a Matrix ghost user ID

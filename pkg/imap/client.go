@@ -828,10 +828,11 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID) error {
 		UID: true,
 	}
 
-	// Also fetch headers and text content
+	// Also fetch headers, text content, and the full raw body so MIME parts (HTML/attachments) are available
 	fetchOptions.BodySection = []*imap.FetchItemBodySection{
 		{Specifier: imap.PartSpecifierHeader},
 		{Specifier: imap.PartSpecifierText},
+		{Specifier: imap.PartSpecifierNone}, // full message body
 	}
 
 	// Create UID set and execute fetch command
