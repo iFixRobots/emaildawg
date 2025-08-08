@@ -589,6 +589,9 @@ func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem
 		}
 		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Successfully recreated disappeared portal")
 	}
+
+	// Post-room-create membership verification (best-effort; uses UpdateInfo when available)
+	ec.Main.verifyMembership(ctx, portalCheck, ec.UserLogin, messageData.Thread)
 	
 	// Queue the event with the bridge framework - this will create the room if needed
 	result := ec.UserLogin.QueueRemoteEvent(matrixEvent)
@@ -644,13 +647,19 @@ func (ec *EmailClient) handleParticipantChange(ctx context.Context, item *syncQu
 		return
 	}
 	
-	// Handle participant changes (adding/removing users from the Matrix room)
-	// This would involve updating the room membership based on email participants
+	// Handle participant changes by reconciling membership via ChatInfo Members
+	// Get latest thread info and apply membership updates
+	thread := ec.Main.ThreadManager.GetThreadByID(string(ec.UserLogin.ID), item.threadID)
+	if thread == nil {
+		ec.UserLogin.Log.Warn().Str("thread_id", item.threadID).Msg("No thread found for participant change; skipping membership reconcile")
+		return
+	}
+	ec.Main.verifyMembership(ctx, portal, ec.UserLogin, thread)
 	
-	ec.UserLogin.Log.Debug().
+	ec.UserLogin.Log.Info().
 		Str("thread_id", item.threadID).
 		Any("participants", participantData).
-		Msg("Processed participant change")
+		Msg("Reconciled participants in Matrix room via ChatInfo Members")
 }
 
 // GetCapabilities returns the capabilities of this network

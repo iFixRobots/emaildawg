@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/mautrix-emaildawg/pkg/imap"
 	"go.mau.fi/mautrix-emaildawg/pkg/matrix"
 	"go.mau.fi/mautrix-emaildawg/pkg/email"
+	"maunium.net/go/mautrix/event"
 )
 
 type EmailConnector struct {
@@ -262,6 +263,65 @@ func (ec *EmailConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	}}
 }
 
+//// verifyMembership performs a best-effort membership verification after a portal is ensured.
+// Preferred approach in bridgev2: apply membership via ChatInfoChange/MemberChanges.
+func (ec *EmailConnector) verifyMembership(ctx context.Context, portal *bridgev2.Portal, userLogin *bridgev2.UserLogin, thread *email.EmailThread) {
+	if portal == nil || thread == nil {
+		return
+	}
+	roomID := string(portal.MXID)
+	if roomID == "" {
+		// Room not yet created (will be created on first event). ChatInfo path will include members.
+		ec.Bridge.Log.Debug().
+			Str("thread_id", thread.ThreadID).
+			Str("receiver", string(userLogin.ID)).
+			Msg("Membership verification skipped: room not yet created")
+		return
+	}
+	// Build expected members: receiver + email participants (ghosts)
+	memberMap := make(map[networkid.UserID]bridgev2.ChatMember)
+	// Receiver (bridge user for this login)
+	memberMap[networkid.UserID(userLogin.ID)] = bridgev2.ChatMember{
+		EventSender: bridgev2.EventSender{IsFromMe: true},
+	}
+	for _, addr := range thread.Participants {
+		// Skip if participant equals receiver
+		if strings.EqualFold(addr, string(userLogin.ID)) {
+			continue
+		}
+		uid := networkid.UserID(fmt.Sprintf("email:%s", strings.TrimSpace(addr)))
+		memberMap[uid] = bridgev2.ChatMember{EventSender: bridgev2.EventSender{Sender: uid}}
+	}
+	powerLevels := &bridgev2.PowerLevelOverrides{
+		// Match RoomManager defaults: messages allowed (0), state changes restricted (101)
+		EventsDefault: ptr.Ptr(0),
+		StateDefault:  ptr.Ptr(101),
+		Ban:           ptr.Ptr(101),
+		Kick:          ptr.Ptr(101),
+		Invite:        ptr.Ptr(101),
+		Redact:        ptr.Ptr(101),
+		Events: map[event.Type]int{
+			event.StateRoomName:   101,
+			event.StateTopic:      101,
+			event.StateRoomAvatar: 101,
+			event.EventReaction:   101,
+			event.EventRedaction:  101,
+		},
+	}
+	chatInfo := &bridgev2.ChatInfo{
+		Members: &bridgev2.ChatMemberList{
+			MemberMap:   memberMap,
+			PowerLevels: powerLevels,
+		},
+	}
+	// Apply changes. bridgev2 will diff and enforce membership as needed.
+	portal.UpdateInfo(ctx, chatInfo, userLogin, nil, time.Time{})
+	ec.Bridge.Log.Info().
+		Str("room_id", roomID).
+		Str("thread_id", thread.ThreadID).
+		Int("member_count", len(memberMap)).
+		Msg("Membership verification applied via ChatInfo Members")
+}
 
 // Helper functions for creating network IDs
 func MakeUserID(email string) networkid.UserID {
