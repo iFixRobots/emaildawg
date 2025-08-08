@@ -1030,20 +1030,24 @@ func normalizeContentLocation(s string) string {
 // findCIDsInHTML finds cid: references in img/src and css url()
 func findCIDsInHTML(html string) map[string]struct{} {
 	res := make(map[string]struct{})
-	// src\s*=\s*['\"]?cid:([^'\"\s)]+)
-	reImg := regexp.MustCompile(`(?i)src\s*=\s*['\"]?cid:([^'\"\s)>]+)`) 
-	matches := reImg.FindAllStringSubmatch(html, -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			res[normalizeCIDRef(m[1])] = struct{}{}
+	// Match img src with cid: without using angle brackets to avoid encoding issues
+	reImg, err := regexp.Compile(`(?i)src\s*=\s*['"]?\s*cid:([^'"\s)]+)`)
+	if err == nil {
+		matches := reImg.FindAllStringSubmatch(html, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				res[normalizeCIDRef(m[1])] = struct{}{}
+			}
 		}
 	}
-	// url\(cid:...)
-	reCSS := regexp.MustCompile(`(?i)url\(\s*cid:([^\)\s]+)\s*\)`) 
-	matches = reCSS.FindAllStringSubmatch(html, -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			res[normalizeCIDRef(m[1])] = struct{}{}
+	// Match CSS url(cid:...)
+	reCSS, err := regexp.Compile(`(?i)url\(\s*cid:([^) \t\r\n]+)\s*\)`)
+	if err == nil {
+		matches := reCSS.FindAllStringSubmatch(html, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				res[normalizeCIDRef(m[1])] = struct{}{}
+			}
 		}
 	}
 	return res
@@ -1070,8 +1074,10 @@ func findContentLocationsInHTML(html string) map[string]struct{} {
 
 func findAttachmentByCID(atts []*EmailAttachment, cid string) int {
 	for i, a := range atts {
-		if a != nil && a.ContentID != "" && a.ContentID == cid {
-			return i
+		if a != nil && a.ContentID != "" {
+			if normalizeCIDRef(a.ContentID) == normalizeCIDRef(cid) {
+				return i
+			}
 		}
 	}
 	return -1
@@ -1099,49 +1105,61 @@ func bestFilename(att *EmailAttachment, fallback string) string {
 // rewriteHTMLInline replaces cid: and content-location references with mxc urls
 func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[string]string) string {
 	out := html
-	// Replace cid: in src and CSS url()
-	reImg := regexp.MustCompile(`(?i)(src\\s*=\\s*['\\"])cid:([^'\\"\\s)\u003e]+)`) 
-	out = reImg.ReplaceAllStringFunc(out, func(m string) string {
-		subs := reImg.FindStringSubmatch(m)
-		if len(subs) > 2 {
-			prefix := subs[1]
-			cidRef := subs[2]
-			cid := normalizeCIDRef(cidRef)
-			if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
-				return prefix + mxc
+	// Replace cid: in img src without referencing angle brackets
+	reImg, err := regexp.Compile(`(?i)(src\s*=\s*['"])\s*cid:([^'"\s)]+)`) 
+	if err == nil {
+		out = reImg.ReplaceAllStringFunc(out, func(m string) string {
+			subs := reImg.FindStringSubmatch(m)
+			if len(subs) > 2 {
+				prefix := subs[1]
+				cidRef := subs[2]
+				cid := normalizeCIDRef(cidRef)
+				if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
+					return prefix + mxc
+				}
 			}
-		}
-		return m
-	})
-	reCSS := regexp.MustCompile(`(?i)url\(\s*cid:([^\)\s]+)\s*\)`) 
-	out = reCSS.ReplaceAllStringFunc(out, func(m string) string {
-		subs := reCSS.FindStringSubmatch(m)
-		if len(subs) > 1 {
-			cid := normalizeCIDRef(subs[1])
-			if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
-				return "url(" + mxc + ")"
+			return m
+		})
+	}
+	// Replace CSS url(cid:...)
+	reCSS, err := regexp.Compile(`(?i)url\(\s*cid:([^) \t\r\n]+)\s*\)`) 
+	if err == nil {
+		out = reCSS.ReplaceAllStringFunc(out, func(m string) string {
+			subs := reCSS.FindStringSubmatch(m)
+			if len(subs) > 1 {
+				cid := normalizeCIDRef(subs[1])
+				if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
+					return "url(" + mxc + ")"
+				}
 			}
-		}
-		return m
-	})
+			return m
+		})
+	}
 	// Replace content-location src references
-	reLoc := regexp.MustCompile(`(?i)src\s*=\s*(['\"])([^'\"]+)\1`)
-	out = reLoc.ReplaceAllStringFunc(out, func(m string) string {
-		subs := reLoc.FindStringSubmatch(m)
-		if len(subs) > 2 {
-			val := subs[2]
-			low := strings.ToLower(val)
-			if strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") || strings.HasPrefix(low, "data:") || strings.HasPrefix(low, "cid:") {
-				return m
+	reLoc, err := regexp.Compile(`(?i)src\s*=\s*(['\"])([^'\"]+)(['\"])`)
+	if err == nil {
+		out = reLoc.ReplaceAllStringFunc(out, func(m string) string {
+			subs := reLoc.FindStringSubmatch(m)
+			if len(subs) > 3 {
+				open := subs[1]
+				val := subs[2]
+				close := subs[3]
+				// ensure matching quotes
+				if open != close {
+					return m
+				}
+				low := strings.ToLower(val)
+				if strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") || strings.HasPrefix(low, "data:") || strings.HasPrefix(low, "cid:") {
+					return m
+				}
+				key := normalizeContentLocation(val)
+				if mxc, ok := locToMXC[key]; ok && mxc != "" {
+					return "src=" + open + mxc + close
+				}
 			}
-			key := normalizeContentLocation(val)
-			if mxc, ok := locToMXC[key]; ok && mxc != "" {
-				quote := subs[1]
-				return "src=" + quote + mxc + quote
-			}
-		}
-		return m
-	})
+			return m
+		})
+	}
 	return out
 }
 
