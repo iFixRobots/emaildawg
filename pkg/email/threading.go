@@ -54,8 +54,6 @@ type ThreadMetadataResolver interface {
 type ThreadManager struct {
 	// Cache of known threads with size limit to prevent memory leaks
 	knownThreads map[string]*EmailThread // key: receiver|threadID
-	maxThreads   int
-	lastUsed     map[string]time.Time // For LRU eviction
 	mu           sync.RWMutex
 	resolver     ThreadMetadataResolver // optional external resolver
 }
@@ -116,52 +114,6 @@ type ParsedEmail struct {
 	Attachments []*EmailAttachment
 }
 
-// ParseEmailHeaders parses raw email headers and extracts threading information
-func (tm *ThreadManager) ParseEmailHeaders(rawEmail string) (*ParsedEmail, error) {
-	// Parse email using Go's mail package
-	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
-	if err != nil {
-		return nil, err
-	}
-
-	header := msg.Header
-
-	// Extract basic headers
-	parsed := &ParsedEmail{
-		MessageID: cleanMessageID(header.Get("Message-Id")),
-		InReplyTo: cleanMessageID(header.Get("In-Reply-To")),
-		Subject:   header.Get("Subject"),
-		From:      header.Get("From"),
-	}
-
-	// Parse date
-	if dateStr := header.Get("Date"); dateStr != "" {
-		if date, err := mail.ParseDate(dateStr); err == nil {
-			parsed.Date = date
-		} else {
-			parsed.Date = time.Now() // Fallback to current time
-		}
-	} else {
-		parsed.Date = time.Now()
-	}
-
-	// Parse recipients
-	parsed.To = parseAddressList(header.Get("To"))
-	parsed.Cc = parseAddressList(header.Get("Cc"))
-	parsed.Bcc = parseAddressList(header.Get("Bcc"))
-
-	// Parse References header for full thread chain
-	if references := header.Get("References"); references != "" {
-		parsed.References = parseReferences(references)
-	}
-
-	// Parse email body for text/HTML content
-	// This will be handled by the processor when processing the full IMAP message
-	parsed.TextContent = ""
-	parsed.HTMLContent = ""
-
-	return parsed, nil
-}
 
 // DetermineThread analyzes an email and determines which thread it belongs to
 func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *EmailThread {
@@ -270,12 +222,6 @@ func (tm *ThreadManager) addToExistingThread(thread *EmailThread, email *ParsedE
 		allParticipants[participant] = true
 	}
 	
-	// Update participants list
-	var newParticipants []string
-	for email := range allParticipants {
-		newParticipants = append(newParticipants, email)
-	}
-	
 	// Store participant changes for Matrix room updates
 	var addedParticipants, removedParticipants []string
 	
@@ -375,32 +321,6 @@ func cleanMessageID(messageID string) string {
 	return messageID
 }
 
-// parseAddressList parses a comma-separated list of email addresses
-func parseAddressList(addressList string) []string {
-	if addressList == "" {
-		return nil
-	}
-
-	// Use Go's mail package to properly parse addresses
-	addresses, err := mail.ParseAddressList(addressList)
-	if err != nil {
-		// Fallback to simple comma splitting
-		parts := strings.Split(addressList, ",")
-		var result []string
-		for _, part := range parts {
-			if addr := extractEmailAddress(strings.TrimSpace(part)); addr != "" {
-				result = append(result, addr)
-			}
-		}
-		return result
-	}
-
-	var result []string
-	for _, addr := range addresses {
-		result = append(result, addr.Address)
-	}
-	return result
-}
 
 // parseReferences parses the References header into individual Message-IDs
 func parseReferences(references string) []string {

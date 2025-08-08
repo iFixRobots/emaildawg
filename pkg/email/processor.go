@@ -1354,12 +1354,12 @@ func sanitizeFilename(name string) string {
 // Returns (rewrittenHTML, replaced, failed)
 func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridgev2.MatrixAPI, html string) (string, int, int) {
 	out := html
-	reDataImg, err := regexp.Compile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*['\"]`)
+reDataImg, err := regexp.Compile(`(?i)(src\s*=\s*)(['"])\s*data:([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+);base64,([a-z0-9+/=]+)\s*['\"]`)
 	if err != nil {
 		// If the regex fails to compile for any reason, don't panic; just skip externalization.
 		return out, 0, 0
 	}
-	reDataCSS, err := regexp.Compile(`(?i)url\(\s*data:([a-z0-9!#$\u0026^_.+-]+/[a-z0-9!#$\u0026^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
+reDataCSS, err := regexp.Compile(`(?i)url\(\s*data:([a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+);base64,([a-z0-9+/=]+)\s*\)`)
 	if err != nil {
 		return out, 0, 0
 	}

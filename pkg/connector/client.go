@@ -39,8 +39,7 @@ type EmailClient struct {
 	lastSyncTime     time.Time
 	
 	// Background processing
-	syncQueue     chan *syncQueueItem
-	syncQueueLock sync.Mutex
+	syncQueue chan *syncQueueItem
 }
 
 type syncQueueItem struct {
@@ -563,7 +562,7 @@ func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem
 	if portal == nil {
 		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal doesn't exist, creating it")
 		// Create the portal - this will call GetChatInfo to set up the room
-		portal, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+		_, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
 		if err != nil {
 			ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to create portal")
 			return
@@ -582,7 +581,7 @@ func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem
 	if portalCheck == nil {
 		ec.UserLogin.Log.Warn().Str("portal_key", string(portalKey.ID)).Msg("Portal disappeared between creation and queuing - this indicates a race condition")
 		// Try creating again as a fallback
-		portalCheck, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+		_, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
 		if err != nil {
 			ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to recreate disappeared portal")
 			return

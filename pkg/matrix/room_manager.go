@@ -58,9 +58,6 @@ for _, emailAddr := range thread.Participants {
 			continue
 		}
 
-		// Use formatter to satisfy linter and as a future hook for naming.
-		_ = rm.formatGhostDisplayName(emailAddr)
-
 		ghostID := rm.emailToGhostID(emailAddr)
 		memberMap[ghostID] = bridgev2.ChatMember{
 			EventSender: bridgev2.EventSender{Sender: ghostID},
@@ -151,23 +148,6 @@ func (rm *RoomManager) emailToGhostID(email string) networkid.UserID {
 	return networkid.UserID(fmt.Sprintf("email:%s", addr))
 }
 
-// formatGhostDisplayName creates a friendly display name for email ghosts
-func (rm *RoomManager) formatGhostDisplayName(email string) string {
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		return email
-	}
-	
-	username := parts[0]
-	domain := parts[1]
-	
-	// Make username more readable
-	username = strings.ReplaceAll(username, ".", " ")
-	username = strings.ReplaceAll(username, "_", " ")
-	username = strings.Title(username)
-	
-	return fmt.Sprintf("%s (%s)", username, domain)
-}
 
 
 // Note: UpdateRoomParticipants and SendEmailMessage will be handled by the EmailConnector

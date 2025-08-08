@@ -23,7 +23,6 @@ import (
 type IMAPDebugWriter struct {
 	logger    *zerolog.Logger
 	sanitized bool
-	secret    string
 }
 
 // Write implements io.Writer to log IMAP protocol messages
@@ -110,8 +109,6 @@ type EmailProvider struct {
 	OAuth    bool
 }
 
-// Reference the processNewMessages method so linters see it as used while it's kept for future backfill logic.
-var _ = (*Client).processNewMessages
 
 var CommonProviders = map[string]EmailProvider{
 	"gmail.com": {
@@ -262,7 +259,7 @@ func (c *Client) Connect() error {
 	}
 
 	// Create IMAP client with debug logging enabled
-	debugWriter := &IMAPDebugWriter{logger: c.log, sanitized: c.sanitized, secret: c.secret}
+	debugWriter := &IMAPDebugWriter{logger: c.log, sanitized: c.sanitized}
 	c.client = imapclient.New(conn, &imapclient.Options{
 		DebugWriter: debugWriter, // Enable full IMAP protocol debugging
 	})
@@ -750,26 +747,6 @@ func (c *Client) SetProcessor(processor *email.Processor) {
 	c.processor = processor
 }
 
-// processNewMessages handles new email messages by fetching and processing them
-// Note: currently unused, but kept for future backfill logic.
-// nolint:unused // reserved for future backfill logic
-func (c *Client) processNewMessages(fromUID, toUID imap.UID) {
-	if c.processor == nil {
-		c.log.Warn().Msg("No email processor set, skipping message processing")
-		return
-	}
-
-	c.log.Info().Uint32("from", uint32(fromUID)).Uint32("to", uint32(toUID)).Msg("Processing new messages")
-
-	ctx := context.Background()
-
-	// Fetch messages in the UID range
-	for uid := fromUID; uid <= toUID; uid++ {
-		if err := c.processMessage(ctx, uid); err != nil {
-			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message")
-		}
-	}
-}
 
 // getPortalLock returns a mutex for a given portal ID, creating it if needed
 func (c *Client) getPortalLock(id string) *sync.Mutex {
