@@ -258,7 +258,6 @@ func (c *Client) Disconnect() error {
 	// Stop IDLE if running
 	if c.idling {
 		close(c.stopIdle)
-		c.stopIdle = make(chan struct{})
 		c.idling = false
 	}
 
@@ -302,6 +301,8 @@ func (c *Client) StartIDLE() error {
 		c.mu.Unlock()
 		return fmt.Errorf("not connected to IMAP server")
 	}
+	// Create a fresh stop channel for this IDLE session
+	c.stopIdle = make(chan struct{})
 	c.idling = true
 	c.mu.Unlock()
 
@@ -361,7 +362,7 @@ func (c *Client) StopIDLE() {
 		close(c.stopIdle)
 	}
 	
-	c.stopIdle = make(chan struct{})
+	// Do NOT recreate stopIdle here to avoid losing the stop signal in the running goroutine
 	c.idling = false
 }
 
@@ -404,8 +405,17 @@ func (c *Client) idleLoop() {
 func (c *Client) runIDLE() error {
 	c.log.Debug().Msg("Starting IDLE session")
 
+	// Ensure client is still connected
+	c.mu.RLock()
+	connected := c.connected
+	cli := c.client
+	c.mu.RUnlock()
+	if !connected || cli == nil {
+		return fmt.Errorf("not connected to IMAP server")
+	}
+
 	// Create IDLE command
-	idleCmd, err := c.client.Idle()
+	idleCmd, err := cli.Idle()
 	if err != nil {
 		// If IDLE fails due to "already running", this indicates server-side state desync
 		// Force a reconnection to clean up the connection state
