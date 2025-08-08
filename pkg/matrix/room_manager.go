@@ -48,7 +48,7 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 	memberMap[bridgeUserID] = bridgev2.ChatMember{
 		EventSender: bridgev2.EventSender{IsFromMe: true},
 		Membership:  event.MembershipJoin,
-		PowerLevel:  ptr.Ptr(100), // Admin level
+		PowerLevel:  ptr.Ptr(9001), // Bridge bot admin level (matches createRoom overrides)
 	}
 
 	// Add email participants as read-only members
@@ -71,8 +71,8 @@ for _, emailAddr := range thread.Participants {
 
 	// Set up power levels to make room read-only for email participants
 	powerLevels := &bridgev2.PowerLevelOverrides{
-		// Allow sending normal messages by default so ghost users can post email content.
-		// Keep state changes restricted to the bridge account.
+		// Keep state changes restricted to the bridge account. Block user-sent messages/reactions/redactions.
+		// The bridge bot has a high power level and can still post bridged content.
 		EventsDefault: ptr.Ptr(0),
 		StateDefault:  ptr.Ptr(101),
 		Ban:           ptr.Ptr(101),
@@ -83,7 +83,7 @@ for _, emailAddr := range thread.Participants {
 			event.StateRoomName:   101,
 			event.StateTopic:      101,
 			event.StateRoomAvatar: 101,
-			// Do not override EventMessage to 101 – leave it at EventsDefault (0)
+			event.EventMessage:    101,
 			event.EventReaction:   101,
 			event.EventRedaction:  101,
 		},

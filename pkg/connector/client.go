@@ -590,9 +590,6 @@ func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem
 		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Successfully recreated disappeared portal")
 	}
 
-	// Post-room-create membership verification (best-effort; uses UpdateInfo when available)
-	ec.Main.verifyMembership(ctx, portalCheck, ec.UserLogin, messageData.Thread)
-	
 	// Queue the event with the bridge framework - this will create the room if needed
 	result := ec.UserLogin.QueueRemoteEvent(matrixEvent)
 	if !result.Success {
