@@ -1,4 +1,4 @@
-# Makefile for mautrix-emaildawg bridge
+# Makefile for emaildawg bridge
 
 # Detect platform
 UNAME_S := $(shell uname -s)
@@ -37,13 +37,13 @@ BUILD_TIME := $(shell date -Iseconds)
 GO_LDFLAGS := -s -w -X main.Tag=$(TAG) -X main.Commit=$(COMMIT) -X main.BuildTime=$(BUILD_TIME)
 
 build:
-	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -ldflags "$(GO_LDFLAGS)" -o mautrix-emaildawg ./cmd/mautrix-emaildawg
+	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go build -ldflags "$(GO_LDFLAGS)" -o emaildawg ./cmd/emaildawg
 
 clean:
-	rm -f mautrix-emaildawg
+	rm -f emaildawg
 
 install: build
-	install -m 755 mautrix-emaildawg /usr/local/bin/
+	install -m 755 emaildawg /usr/local/bin/
 
 test:
 	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" go test ./...
@@ -62,6 +62,6 @@ ifeq ($(UNAME_S),Linux)
 endif
 
 run-example: build
-	./mautrix-emaildawg --help
+	./emaildawg --help
 
 .DEFAULT_GOAL := build

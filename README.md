@@ -1,4 +1,4 @@
-# mautrix-emaildawg
+# emaildawg
 
 A Matrix–Email bridge built on mautrix bridgev2. Focused on reliable email consumption in Matrix rooms (not chat features).
 
@@ -41,8 +41,8 @@ bbctl run sh-emaildawg
 ```bash
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
-./mautrix-emaildawg --generate-example-config
-./mautrix-emaildawg --generate-registration
+./emaildawg --generate-example-config
+./emaildawg --generate-registration
 # Edit config.yaml with your Matrix homeserver details
 # IMPORTANT: The default SQLite DB URI is file:./data/emaildawg.db; ensure ./data exists and is writable.
 mkdir -p ./data
@@ -85,7 +85,7 @@ make build
 ./mautrix-emaildawg --generate-registration
 # Edit config.yaml with your homeserver details
 # Register registration.yaml with your Matrix homeserver
-./mautrix-emaildawg
+./emaildawg
 ```
 
 ## Configuration

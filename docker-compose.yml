@@ -1,19 +1,19 @@
 version: '3.8'
 
 services:
-  mautrix-emaildawg:
+  emaildawg:
     build: .
     restart: unless-stopped
     volumes:
-      - ./config.yaml:/opt/mautrix-emaildawg/config.yaml:ro
-      - ./registration.yaml:/opt/mautrix-emaildawg/registration.yaml:ro
-      - emaildawg_data:/opt/mautrix-emaildawg/data
+      - ./config.yaml:/opt/emaildawg/config.yaml:ro
+      - ./registration.yaml:/opt/emaildawg/registration.yaml:ro
+      - emaildawg_data:/opt/emaildawg/data
     ports:
       - "29319:29319"
     depends_on:
       - postgres
     environment:
-      - MAUTRIX_CONFIG_PATH=/opt/mautrix-emaildawg/config.yaml
+      - MAUTRIX_CONFIG_PATH=/opt/emaildawg/config.yaml
     networks:
       - mautrix
 
