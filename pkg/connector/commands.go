@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -82,9 +83,20 @@ var (
 		Help: commands.HelpMeta{
 			Section:     HelpSectionAdmin,
 			Description: "Reconnect to IMAP server for a specific account",
-			Args:        "[<email address>]",
+			Args:        "[\u003cemail address\u003e]",
 		},
 		RequiresLogin: true,
+	}
+
+	// Destructive: Deletes the bridge database immediately. Intended for homeserver-driven deletions.
+	CommandNuke = &commands.FullHandler{
+		Func: fnNuke,
+		Name: "nuke",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAdmin,
+			Description: "Delete all bridge state (database). Intended for automated bridge removal.",
+		},
+		RequiresLogin: false,
 	}
 )
 
@@ -180,6 +192,36 @@ func fnStatus(ce *commands.Event) {
 	}
 
 	ce.Reply(statusMsg)
+}
+
+// fnNuke deletes the bridge database files immediately.
+// This is intended to be called by the homeserver/bridge bot during bridge removal.
+func fnNuke(ce *commands.Event) {
+	if ConnectorInstance == nil {
+		ce.Reply("⚠️ Bridge not initialized.")
+		return
+	}
+	// Stop IMAP to release DB handles
+	if ConnectorInstance.IMAPManager != nil {
+		ConnectorInstance.IMAPManager.StopAll()
+	}
+	// Known DB files in working dir
+	candidates := []string{
+		"sh-emaildawg.db",
+		"sh-emaildawg.db-wal",
+		"sh-emaildawg.db-shm",
+	}
+	removed := 0
+	for _, path := range candidates {
+		if err := os.Remove(path); err == nil {
+			removed++
+		}
+	}
+	if removed == 0 {
+		ce.Reply("ℹ️ No bridge DB files found to delete.")
+		return
+	}
+	ce.Reply("🧨 Bridge database deleted (%d file(s)). Please restart the bridge service.", removed)
 }
 
 func fnLogin(ce *commands.Event) {

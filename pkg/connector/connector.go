@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
@@ -107,9 +108,13 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		bridge.Log.Fatal().Err(err).Msg("Failed to create email_accounts table")
 	}
 	// Create thread index table and helper
-	ec.ThreadIndex = &EmailThreadIndexQuery{DB: bridge.DB}
+ec.ThreadIndex = &EmailThreadIndexQuery{DB: bridge.DB}
 	if err := ec.ThreadIndex.CreateTable(ctx); err != nil {
 		bridge.Log.Fatal().Err(err).Msg("Failed to create email_thread_index table")
+	}
+	// Database health check: ensure we can write to the DB directory to avoid runtime I/O errors
+	if err := ec.checkDBWritable(ctx); err != nil {
+		bridge.Log.Fatal().Err(err).Msg("Database is not writable. Fix filesystem permissions or remove stale DB files, then restart the bridge.")
 	}
 
 	// Initialize managers
@@ -140,6 +145,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		CommandList,
 		CommandSync,
 		CommandReconnect,
+		CommandNuke,
 	)
 }
 
@@ -264,4 +270,23 @@ func MakeUserID(email string) networkid.UserID {
 
 func MakePortalID(threadID string) networkid.PortalID {
 	return networkid.PortalID(fmt.Sprintf("thread:%s", threadID))
+}
+
+// checkDBWritable attempts a few write operations to ensure the underlying DB is writable
+// and the directory allows journaling/WAL files. This prevents silent runtime failures later.
+func (ec *EmailConnector) checkDBWritable(ctx context.Context) error {
+	// Create a tiny health table and write a row, then delete it.
+	_, err := ec.Bridge.DB.Exec(ctx, `CREATE TABLE IF NOT EXISTS email_health_check (ts INTEGER NOT NULL)`)
+	if err != nil {
+		return fmt.Errorf("failed to create health check table: %w", err)
+	}
+	_, err = ec.Bridge.DB.Exec(ctx, `INSERT INTO email_health_check (ts) VALUES (?)`, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("failed to insert into health check table: %w", err)
+	}
+	_, err = ec.Bridge.DB.Exec(ctx, `DELETE FROM email_health_check`)
+	if err != nil {
+		return fmt.Errorf("failed to delete from health check table: %w", err)
+	}
+	return nil
 }
