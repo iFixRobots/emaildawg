@@ -639,7 +639,12 @@ func processTextLogin(ctx context.Context, ce *commands.Event, email, password s
 
 // buildEnhancedLoginInstructions enhances the form-based instructions with text command info
 func buildEnhancedLoginInstructions(originalInstructions string) string {
-	return `🔐 **Email Bridge Login**
+	// Include original form-based instructions at the top if provided
+	prefix := ""
+	if strings.TrimSpace(originalInstructions) != "" {
+		prefix = strings.TrimSpace(originalInstructions) + "\n\n"
+	}
+	return prefix + `🔐 **Email Bridge Login**
 
 **Method 1: Quick Command**
 ` + "`!email login email:your@email.com password:yourpassword`" + `

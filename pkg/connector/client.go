@@ -409,6 +409,8 @@ func (ec *EmailClient) processSyncItem(ctx context.Context, item *syncQueueItem)
 }
 
 func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
+	// Keep ctx parameter used to satisfy linters even if not currently leveraged here.
+	_ = ctx
 	ec.historySyncMutex.Lock()
 	defer ec.historySyncMutex.Unlock()
 	

@@ -192,7 +192,7 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 	// If we have richer thread info, build the room using RoomManager
 	if ec.ThreadManager != nil && ec.RoomManager != nil {
 		if thread := ec.ThreadManager.GetThreadByID(threadID); thread != nil {
-			return ec.RoomManager.GetChatInfoForThread(ctx, thread, *userLogin)
+return ec.RoomManager.GetChatInfoForThread(ctx, thread, userLogin)
 		}
 	}
 

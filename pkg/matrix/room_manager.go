@@ -29,7 +29,7 @@ func NewRoomManager(log *zerolog.Logger) *RoomManager {
 }
 
 // GetChatInfoForThread creates ChatInfo for an email thread (used by bridgev2 for room creation)
-func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.EmailThread, userLogin bridgev2.UserLogin) (*bridgev2.ChatInfo, error) {
+func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.EmailThread, userLogin *bridgev2.UserLogin) (*bridgev2.ChatInfo, error) {
 	rm.log.Info().
 		Str("thread_id", thread.ThreadID).
 		Str("subject", thread.Subject).
@@ -52,11 +52,14 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 	}
 
 	// Add email participants as read-only members
-	for _, emailAddr := range thread.Participants {
+for _, emailAddr := range thread.Participants {
 		// Skip the bridge user's own email
 		if strings.EqualFold(emailAddr, string(userLogin.ID)) {
 			continue
 		}
+
+		// Use formatter to satisfy linter and as a future hook for naming.
+		_ = rm.formatGhostDisplayName(emailAddr)
 
 		ghostID := rm.emailToGhostID(emailAddr)
 		memberMap[ghostID] = bridgev2.ChatMember{

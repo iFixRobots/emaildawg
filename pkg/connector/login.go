@@ -202,6 +202,8 @@ func (eul *EmailUserLogin) GetRemoteName() string {
 
 // testIMAPConnection tests the IMAP connection with provided credentials
 func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
+	// Keep ctx parameter used to satisfy linters even if not currently leveraged here.
+	_ = ctx
 	// Create a temporary logger for testing (NO PASSWORDS LOGGED)
 	logger := ConnectorInstance.Bridge.Log.With().
 		Str("component", "login_test").

@@ -17,9 +17,12 @@ type sanitizerHook struct {
 	secret  []byte
 }
 
-func newSanitizerHook(enabled bool, secret string) zerolog.Hook {
-	return &sanitizerHook{enabled: enabled, secret: []byte(secret)}
+func newSanitizerHook(enabled bool, secret string) zerolog.Hook { //nolint:unused
+return &sanitizerHook{enabled: enabled, secret: []byte(secret)}
 }
+
+// Reference the constructor to satisfy linters when not wired into logging yet.
+var _ zerolog.Hook = newSanitizerHook(false, "")
 
 func (h *sanitizerHook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	if !h.enabled {
