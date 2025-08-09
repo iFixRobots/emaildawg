@@ -13,7 +13,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
-	"github.com/iFixRobots/emaildawg/pkg/email"
 	"github.com/iFixRobots/emaildawg/pkg/imap"
 )
 
@@ -39,13 +38,7 @@ type EmailClient struct {
 	lastSyncTime     time.Time
 	
 	// Background processing
-	syncQueue chan *syncQueueItem
-}
-
-type syncQueueItem struct {
-	threadID string
-	action   string
-	data     any
+	// Note: legacy internal sync queue removed; periodic sync remains.
 }
 
 var (
@@ -63,7 +56,6 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	emailClient := &EmailClient{
 		Main:      ec,
 		UserLogin: login,
-		syncQueue: make(chan *syncQueueItem, 100),
 	}
 	login.Client = emailClient
 	
@@ -347,29 +339,10 @@ func (ec *EmailClient) startLoops() {
 	ctx, cancel := context.WithCancel(context.Background())
 	ec.stopLoops.Store(&cancel)
 	
-	// Start sync queue processor
-	go ec.syncQueueLoop(ctx)
-	
 	// Start periodic sync checker
 	go ec.periodicSyncLoop(ctx)
 }
 
-func (ec *EmailClient) syncQueueLoop(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			ec.UserLogin.Log.Error().Any("panic", r).Msg("Panic in sync queue loop")
-		}
-	}()
-	
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case item := <-ec.syncQueue:
-			ec.processSyncItem(ctx, item)
-		}
-	}
-}
 
 func (ec *EmailClient) periodicSyncLoop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -385,27 +358,6 @@ func (ec *EmailClient) periodicSyncLoop(ctx context.Context) {
 	}
 }
 
-func (ec *EmailClient) processSyncItem(ctx context.Context, item *syncQueueItem) {
-	ec.UserLogin.Log.Debug().
-		Str("thread_id", item.threadID).
-		Str("action", item.action).
-		Msg("Processing sync queue item")
-	
-	switch item.action {
-	case "create_thread":
-		ec.handleCreateThread(ctx, item)
-	case "update_thread":
-		ec.handleUpdateThread(ctx, item)
-	case "new_message":
-		ec.handleNewMessage(ctx, item)
-	case "participant_change":
-		ec.handleParticipantChange(ctx, item)
-	default:
-		ec.UserLogin.Log.Warn().
-			Str("action", item.action).
-			Msg("Unknown sync action")
-	}
-}
 
 func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
 	// Keep ctx parameter used to satisfy linters even if not currently leveraged here.
@@ -444,219 +396,7 @@ func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
 	ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Periodic sync completed")
 }
 
-// Handler methods for different sync actions
-
-func (ec *EmailClient) handleCreateThread(ctx context.Context, item *syncQueueItem) {
-	threadData, ok := item.data.(*email.EmailThread)
-	if !ok {
-		ec.UserLogin.Log.Error().
-			Str("thread_id", item.threadID).
-			Msg("Invalid thread data for create action")
-		return
-	}
-	
-	// Create portal for this email thread
-	portalKey := networkid.PortalKey{
-		ID:       networkid.PortalID(fmt.Sprintf("thread:%s", item.threadID)),
-		Receiver: ec.UserLogin.ID,
-	}
-	
-	// Check if portal already exists
-	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		ec.UserLogin.Log.Error().Err(err).
-			Str("thread_id", item.threadID).
-			Msg("Failed to check existing portal")
-		return
-	}
-	
-	if portal != nil {
-		// Portal already exists, just update it
-		ec.UserLogin.Log.Debug().
-			Str("thread_id", item.threadID).
-			Msg("Portal already exists for thread")
-		return
-	}
-	
-	// Create new portal
-	portal, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
-	if err != nil {
-		ec.UserLogin.Log.Error().Err(err).
-			Str("thread_id", item.threadID).
-			Msg("Failed to create portal for email thread")
-		return
-	}
-	
-	// Ensure the Matrix room is created by triggering portal sync
-	if portal.MXID != "" {
-		ec.UserLogin.Log.Info().
-			Str("thread_id", item.threadID).
-			Str("room_id", portal.MXID.String()).
-			Str("subject", threadData.Subject).
-			Msg("Matrix room already exists for email thread")
-	} else {
-		ec.UserLogin.Log.Info().
-			Str("thread_id", item.threadID).
-			Str("subject", threadData.Subject).
-			Msg("Created portal for email thread - room will be created on first message")
-	}
-}
-
-func (ec *EmailClient) handleUpdateThread(ctx context.Context, item *syncQueueItem) {
-	threadData, ok := item.data.(*email.EmailThread)
-	if !ok {
-		ec.UserLogin.Log.Error().
-			Str("thread_id", item.threadID).
-			Msg("Invalid thread data for update action")
-		return
-	}
-	
-	// Get the portal for this thread
-	portalKey := networkid.PortalKey{
-		ID:       MakePortalID(item.threadID),
-		Receiver: ec.UserLogin.ID,
-	}
-	
-	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		ec.UserLogin.Log.Error().Err(err).
-			Str("thread_id", item.threadID).
-			Msg("Failed to get portal for thread update")
-		return
-	}
-	
-	if portal == nil {
-		// Portal doesn't exist yet, create it instead
-		ec.handleCreateThread(ctx, item)
-		return
-	}
-	
-	ec.UserLogin.Log.Debug().
-		Str("thread_id", item.threadID).
-		Str("subject", threadData.Subject).
-		Msg("Updated thread metadata")
-}
-
-func (ec *EmailClient) handleNewMessage(ctx context.Context, item *syncQueueItem) {
-	messageData, ok := item.data.(*email.EmailMessage)
-	if !ok {
-		ec.UserLogin.Log.Error().
-			Str("thread_id", item.threadID).
-			Msg("Invalid message data for new message action")
-		return
-	}
-	
-	// Convert the email message to a Matrix event
-	matrixEvent := ec.Main.Processor.ToMatrixEvent(ctx, messageData, ec.UserLogin)
-	
-	// CRITICAL: Ensure portal exists before queuing the event
-	portalKey := messageData.PortalKey
-	ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Checking if portal exists before queuing event")
-	
-	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to check existing portal")
-		return
-	}
-	
-	if portal == nil {
-		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal doesn't exist, creating it")
-		// Create the portal - this will call GetChatInfo to set up the room
-		_, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
-		if err != nil {
-			ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to create portal")
-			return
-		}
-		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Successfully created portal for email thread")
-	} else {
-		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal already exists - no need to create")
-	}
-	
-	// Double-check: verify portal still exists right before queuing
-	portalCheck, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to double-check portal existence")
-		return
-	}
-	if portalCheck == nil {
-		ec.UserLogin.Log.Warn().Str("portal_key", string(portalKey.ID)).Msg("Portal disappeared between creation and queuing - this indicates a race condition")
-		// Try creating again as a fallback
-		_, err = ec.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
-		if err != nil {
-			ec.UserLogin.Log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to recreate disappeared portal")
-			return
-		}
-		ec.UserLogin.Log.Info().Str("portal_key", string(portalKey.ID)).Msg("Successfully recreated disappeared portal")
-	}
-
-	// Queue the event with the bridge framework - this will create the room if needed
-	result := ec.UserLogin.QueueRemoteEvent(matrixEvent)
-	if !result.Success {
-		errorStr := "unknown error"
-		if result.Error != nil {
-			errorStr = result.Error.Error()
-		}
-		ec.UserLogin.Log.Error().
-			Str("thread_id", item.threadID).
-			Str("message_id", string(messageData.MessageID)).
-			Str("error", errorStr).
-			Msg("Failed to queue email message for Matrix bridging")
-		return
-	}
-	
-	ec.UserLogin.Log.Info().
-		Str("thread_id", item.threadID).
-		Str("message_id", string(messageData.MessageID)).
-		Str("from", messageData.From).
-		Str("subject", messageData.Subject).
-		Str("portal_key", string(messageData.PortalKey.ID)).
-		Msg("Successfully queued email message for Matrix bridging")
-}
-
-func (ec *EmailClient) handleParticipantChange(ctx context.Context, item *syncQueueItem) {
-	participantData, ok := item.data.(map[string]interface{})
-	if !ok {
-		ec.UserLogin.Log.Error().
-			Str("thread_id", item.threadID).
-			Msg("Invalid participant data for participant change action")
-		return
-	}
-	
-	// Get the portal for this thread
-	portalKey := networkid.PortalKey{
-		ID:       MakePortalID(item.threadID),
-		Receiver: ec.UserLogin.ID,
-	}
-	
-	portal, err := ec.UserLogin.Bridge.GetExistingPortalByKey(ctx, portalKey)
-	if err != nil {
-		ec.UserLogin.Log.Error().Err(err).
-			Str("thread_id", item.threadID).
-			Msg("Failed to get portal for participant change")
-		return
-	}
-	
-	if portal == nil {
-		ec.UserLogin.Log.Warn().
-			Str("thread_id", item.threadID).
-			Msg("Portal not found for participant change")
-		return
-	}
-	
-	// Handle participant changes by reconciling membership via ChatInfo Members
-	// Get latest thread info and apply membership updates
-	thread := ec.Main.ThreadManager.GetThreadByID(string(ec.UserLogin.ID), item.threadID)
-	if thread == nil {
-		ec.UserLogin.Log.Warn().Str("thread_id", item.threadID).Msg("No thread found for participant change; skipping membership reconcile")
-		return
-	}
-	ec.Main.verifyMembership(ctx, portal, ec.UserLogin, thread)
-	
-	ec.UserLogin.Log.Info().
-		Str("thread_id", item.threadID).
-		Any("participants", participantData).
-		Msg("Reconciled participants in Matrix room via ChatInfo Members")
-}
+// Handler methods removed: legacy internal sync queue actions (create/update/new_message/participant_change)
 
 // GetCapabilities returns the capabilities of this network
 func (ec *EmailClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
@@ -690,24 +430,3 @@ func (ec *EmailClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 	}, nil
 }
 
-// Queue a sync item for background processing
-func (ec *EmailClient) QueueSync(threadID, action string, data any) {
-	if !ec.IsConnected() {
-		return
-	}
-	
-	item := &syncQueueItem{
-		threadID: threadID,
-		action:   action,
-		data:     data,
-	}
-	
-	select {
-	case ec.syncQueue <- item:
-	default:
-		ec.UserLogin.Log.Warn().
-			Str("thread_id", threadID).
-			Str("action", action).
-			Msg("Sync queue is full, dropping sync request")
-	}
-}
