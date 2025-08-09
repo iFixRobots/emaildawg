@@ -229,6 +229,15 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 		for range Ticker.C {
 			// Snapshot connected state
 			if !client.IsConnected() {
+				// Attempt to bring the client back online even if it's currently disconnected
+				logger.Warn().Msg("Client disconnected, attempting reconnect from watchdog")
+				if recErr := client.Reconnect(); recErr != nil {
+					logger.Error().Err(recErr).Msg("Reconnect failed from watchdog while disconnected")
+					continue
+				}
+				if err := client.StartIDLE(); err != nil {
+					logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
+				}
 				continue
 			}
 			if err := client.TestConnection(); err != nil {

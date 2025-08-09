@@ -187,7 +187,7 @@ return &Client{
 		sanitized:    sanitized,
 		secret:       secret,
 		stopIdle:     make(chan struct{}),
-		reconnect:    make(chan struct{}),
+		reconnect:    make(chan struct{}, 1),
 		// Circuit breaker settings
 		maxFailures:  5,
 		backoffTime:  time.Minute * 2,
@@ -422,22 +422,26 @@ func (c *Client) idleLoop() {
 			c.log.Debug().Msg("IDLE monitoring stopped")
 			return
 		case <-c.reconnect:
-			c.log.Info().Msg("Reconnecting IMAP client")
+			c.log.Info().Msg("Reconnecting IMAP client (signal)")
 			if err := c.reconnectClient(); err != nil {
-				c.log.Error().Err(err).Msg("Failed to reconnect")
+				c.log.Error().Err(err).Msg("Failed to reconnect (signal)")
 				// Wait before retrying
 				time.Sleep(30 * time.Second)
 				continue
 			}
+			// After successful reconnect, loop to start IDLE again
+			continue
 		default:
 			if err := c.runIDLE(); err != nil {
-				c.log.Error().Err(err).Msg("IDLE failed, will reconnect")
-				// Trigger reconnection
-				select {
-				case c.reconnect <- struct{}{}:
-				default:
+				c.log.Error().Err(err).Msg("IDLE failed, performing full reconnect")
+				if recErr := c.reconnectClient(); recErr != nil {
+					c.log.Error().Err(recErr).Msg("Reconnect after IDLE failure failed")
+					// Back off before trying again
+					time.Sleep(30 * time.Second)
+					continue
 				}
-				time.Sleep(5 * time.Second)
+				c.log.Info().Msg("Reconnected successfully after IDLE failure")
+				continue
 			}
 		}
 	}
@@ -464,10 +468,7 @@ idleCmd, err := cli.Idle()
 		if strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "IDLE already") {
 			c.log.Warn().Err(err).Msg("IDLE already running on server - forcing reconnection to reset state")
 			// Signal reconnection needed
-			select {
-			case c.reconnect <- struct{}{}:
-			default:
-			}
+			c.triggerReconnect()
 			return fmt.Errorf("IDLE state desync detected, reconnection triggered: %w", err)
 		}
 		if isHardNetErr(err) {
@@ -1172,6 +1173,14 @@ func (c *Client) testConnectionNoLock() error {
 		return fmt.Errorf("IMAP client not connected")
 	}
 	return c.client.Noop().Wait()
+}
+
+// triggerReconnect attempts to enqueue a reconnect signal without piling up.
+func (c *Client) triggerReconnect() {
+	select {
+	case c.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 // isHardNetErr classifies hard network errors that require a full reconnect
