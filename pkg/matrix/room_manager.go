@@ -95,6 +95,14 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 		},
 	}
 
+	// Also include an explicit member entry for the Matrix user to ensure initial membership at creation
+	initialMembers := []bridgev2.ChatMember{
+		{
+			EventSender: bridgev2.EventSender{IsFromMe: true},
+			Membership:  event.MembershipJoin,
+			PowerLevel:  ptr.Ptr(9001),
+		},
+	}
 	chatInfo := &bridgev2.ChatInfo{
 		Name:  ptr.Ptr(roomName),
 		Topic: ptr.Ptr(roomTopic),
@@ -102,6 +110,7 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 		Members: &bridgev2.ChatMemberList{
 			IsFull:           true,
 			TotalMemberCount: len(memberMap),
+			Members:          initialMembers,
 			MemberMap:        memberMap,
 			PowerLevels:      powerLevels,
 		},
