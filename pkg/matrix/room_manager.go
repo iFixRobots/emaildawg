@@ -42,12 +42,13 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 	// Create member map with read-only power levels
 	memberMap := make(map[networkid.UserID]bridgev2.ChatMember)
 
-	// Add the Matrix user (room owner) using the special empty user ID with IsFromMe: true
+	// Add the Matrix user (human user) using the special empty user ID with IsFromMe: true
 	// This ensures the room is auto-joined instead of inviting the user.
+	// IMPORTANT: Do not assign elevated power level to the human user to keep the room read-only.
 	memberMap[networkid.UserID("")] = bridgev2.ChatMember{
 		EventSender: bridgev2.EventSender{IsFromMe: true},
 		Membership:  event.MembershipJoin,
-		PowerLevel:  ptr.Ptr(9001), // Bridge bot admin level (matches createRoom overrides)
+		// PowerLevel intentionally omitted (defaults to 0)
 	}
 
 	// Build a unique set of participants from the thread plus the monitored email
@@ -76,31 +77,14 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 	}
 
 	// Set up power levels to make room read-only for email participants
-	powerLevels := &bridgev2.PowerLevelOverrides{
-		// Keep state changes restricted to the bridge account. Block user-sent messages/reactions/redactions.
-		// The bridge bot has a high power level and can still post bridged content.
-		EventsDefault: ptr.Ptr(0),
-		StateDefault:  ptr.Ptr(101),
-		Ban:           ptr.Ptr(101),
-		Kick:          ptr.Ptr(101),
-		Invite:        ptr.Ptr(101),
-		Redact:        ptr.Ptr(101),
-		Events: map[event.Type]int{
-			event.StateRoomName:   101,
-			event.StateTopic:      101,
-			event.StateRoomAvatar: 101,
-			event.EventMessage:    101,
-			event.EventReaction:   101,
-			event.EventRedaction:  101,
-		},
-	}
+	powerLevels := BuildReadOnlyPowerLevels()
 
 	// Also include an explicit member entry for the Matrix user to ensure initial membership at creation
 	initialMembers := []bridgev2.ChatMember{
 		{
 			EventSender: bridgev2.EventSender{IsFromMe: true},
 			Membership:  event.MembershipJoin,
-			PowerLevel:  ptr.Ptr(9001),
+			// Do not elevate the human user's power level here.
 		},
 	}
 	chatInfo := &bridgev2.ChatInfo{
@@ -123,7 +107,30 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 		Int("member_count", len(memberMap)).
 		Msg("Created ChatInfo for email thread")
 
-	return chatInfo, nil
+return chatInfo, nil
+}
+
+// BuildReadOnlyPowerLevels centralizes the power level configuration for email threads.
+// - Human user at PL 0 (default) is blocked from sending messages/reactions/redactions
+// - State changes require PL 101 (effectively bot/bridge-controlled)
+// - The bridge bot may still be given elevated PL separately by the framework
+func BuildReadOnlyPowerLevels() *bridgev2.PowerLevelOverrides {
+	return &bridgev2.PowerLevelOverrides{
+		EventsDefault: ptr.Ptr(0),
+		StateDefault:  ptr.Ptr(101),
+		Ban:           ptr.Ptr(101),
+		Kick:          ptr.Ptr(101),
+		Invite:        ptr.Ptr(101),
+		Redact:        ptr.Ptr(101),
+		Events: map[event.Type]int{
+			event.StateRoomName:   101,
+			event.StateTopic:      101,
+			event.StateRoomAvatar: 101,
+			event.EventMessage:    101,
+			event.EventReaction:   101,
+			event.EventRedaction:  101,
+		},
+	}
 }
 
 // formatRoomName creates a clean room name from email subject

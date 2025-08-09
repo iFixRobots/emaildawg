@@ -116,6 +116,6 @@ func (eaq *EmailAccountQuery) UpdateLastSync(ctx context.Context, userMXID, emai
 		UPDATE email_accounts
 		SET last_sync_time = ?
 		WHERE user_mxid = ? AND email = ?
-	`, syncTime.Unix(), userMXID, email)
+	`, syncTime, userMXID, email)
 	return err
 }

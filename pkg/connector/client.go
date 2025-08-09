@@ -144,18 +144,21 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 func (ec *EmailClient) Connect(ctx context.Context) {
 	if ec.IMAPClient == nil {
 		state := status.BridgeState{
-			StateEvent: status.StateBadCredentials,
+StateEvent: status.BridgeStateEvent("BAD_CREDENTIALS"),
 			Error:      EmailNotLoggedIn,
 		}
 		ec.UserLogin.BridgeState.Send(state)
 		return
 	}
 	
+	// Emit STARTING before beginning connection work
+ec.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.BridgeStateEvent("STARTING")})
+	
 	// Connect to IMAP server
 	if err := ec.IMAPClient.Connect(); err != nil {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to connect to IMAP server")
 		state := status.BridgeState{
-			StateEvent: status.StateUnknownError,
+StateEvent: status.BridgeStateEvent("BRIDGE_UNREACHABLE"),
 			Error:      EmailConnectionFailed,
 			Info: map[string]any{
 				"go_error": err.Error(),
@@ -165,6 +168,9 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 		return
 	}
 	
+	// We’re connected to the server; emit RUNNING (service up but not yet fully ready)
+ec.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.BridgeStateEvent("RUNNING")})
+	
 	ec.isConnected.Store(true)
 	
 	// Start IMAP IDLE monitoring with retry logic (includes baseline/backfill)
@@ -172,7 +178,7 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE after retries")
 		// Set bridge state to indicate IDLE failure and do NOT mark as connected
 		state := status.BridgeState{
-			StateEvent: status.StateUnknownError,
+StateEvent: status.BridgeStateEvent("TRANSIENT_DISCONNECT"),
 			Error:      EmailConnectionFailed,
 			Info: map[string]any{
 				"go_error":  err.Error(),
@@ -187,7 +193,7 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 	ec.startLoops()
 	
 	// Send connected state only after readiness is complete
-	state := status.BridgeState{StateEvent: status.StateConnected}
+state := status.BridgeState{StateEvent: status.BridgeStateEvent("CONNECTED")}
 	ec.UserLogin.BridgeState.Send(state)
 	
 	ec.UserLogin.Log.Info().Msg("Email client connected successfully and ready (baseline/backfill complete)")
