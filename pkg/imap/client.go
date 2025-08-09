@@ -14,6 +14,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/status"
 
 	"github.com/iFixRobots/emaildawg/pkg/email"
 	logging "github.com/iFixRobots/emaildawg/pkg/logging"
@@ -434,6 +435,15 @@ func (c *Client) idleLoop() {
 		default:
 			if err := c.runIDLE(); err != nil {
 				c.log.Error().Err(err).Msg("IDLE failed, performing full reconnect")
+				// Demote bridge state for this login while we attempt recovery
+				if c.login != nil {
+					c.login.BridgeState.Send(status.BridgeState{
+						StateEvent: status.StateUnknownError,
+						Source:     "network",
+						Info:       map[string]any{"component": "imap", "reason": "idle_failed"},
+						TTL:        300,
+					})
+				}
 				if recErr := c.reconnectClient(); recErr != nil {
 					c.log.Error().Err(recErr).Msg("Reconnect after IDLE failure failed")
 					// Back off before trying again
@@ -441,6 +451,10 @@ func (c *Client) idleLoop() {
 					continue
 				}
 				c.log.Info().Msg("Reconnected successfully after IDLE failure")
+				// Promote bridge state back to connected after successful reconnect
+				if c.login != nil {
+					c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+				}
 				continue
 			}
 		}

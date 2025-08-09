@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/status"
 
 	"github.com/iFixRobots/emaildawg/pkg/email"
 )
@@ -231,17 +232,38 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 			if !client.IsConnected() {
 				// Attempt to bring the client back online even if it's currently disconnected
 				logger.Warn().Msg("Client disconnected, attempting reconnect from watchdog")
+				// Demote bridge state for this login while attempting recovery
+				if client.login != nil {
+					client.login.BridgeState.Send(status.BridgeState{
+						StateEvent: status.StateUnknownError,
+						Source:     "network",
+						Info:       map[string]any{"component": "imap", "reason": "watchdog_disconnected"},
+						TTL:        300,
+					})
+				}
 				if recErr := client.Reconnect(); recErr != nil {
 					logger.Error().Err(recErr).Msg("Reconnect failed from watchdog while disconnected")
 					continue
 				}
 				if err := client.StartIDLE(); err != nil {
 					logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
+				} else if client.login != nil {
+					// Promote back to connected when IDLE starts
+					client.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 				}
 				continue
 			}
 			if err := client.TestConnection(); err != nil {
 				logger.Warn().Err(err).Msg("Health probe failed, triggering reconnect")
+				// Demote while we recover
+				if client.login != nil {
+					client.login.BridgeState.Send(status.BridgeState{
+						StateEvent: status.StateUnknownError,
+						Source:     "network",
+						Info:       map[string]any{"component": "imap", "reason": "watchdog_probe_failed"},
+						TTL:        300,
+					})
+				}
 				if recErr := client.Reconnect(); recErr != nil {
 					logger.Error().Err(recErr).Msg("Reconnect failed from watchdog")
 					continue
@@ -249,6 +271,8 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 				// Restart IDLE after reconnect
 				if err := client.StartIDLE(); err != nil {
 					logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
+				} else if client.login != nil {
+					client.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
 				}
 			}
 		}
