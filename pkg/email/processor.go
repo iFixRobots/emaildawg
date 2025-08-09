@@ -626,9 +626,9 @@ func formatIMAPAddressSlice(addrs []imap.Address) []string {
 
 // isOutboundMessage determines if this email was sent by the bridge user
 func (p *Processor) isOutboundMessage(email *ParsedEmail, userLogin *bridgev2.UserLogin) bool {
-	userEmail := string(userLogin.ID)
+	// userLogin.ID is of the form "email:<addr>". Compare against the raw email address.
+	userEmail := strings.TrimPrefix(string(userLogin.ID), "email:")
 	fromEmail := extractEmailAddress(email.From)
-	
 	return strings.EqualFold(fromEmail, userEmail)
 }
 

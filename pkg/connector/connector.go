@@ -291,19 +291,31 @@ func (ec *EmailConnector) verifyMembership(ctx context.Context, portal *bridgev2
 			Msg("Membership verification skipped: room not yet created")
 		return
 	}
-	// Build expected members: receiver + email participants (ghosts)
+	// Build expected members: Matrix user + email participants (ghosts, including monitored email)
 	memberMap := make(map[networkid.UserID]bridgev2.ChatMember)
-	// Receiver (bridge user for this login)
-	memberMap[networkid.UserID(userLogin.ID)] = bridgev2.ChatMember{
+	// Matrix user (special empty user ID) for auto-join
+	memberMap[networkid.UserID("")] = bridgev2.ChatMember{
 		EventSender: bridgev2.EventSender{IsFromMe: true},
+		Membership:  event.MembershipJoin,
 	}
+	// Build unique participant set from thread.Participants plus monitored email derived from userLogin.ID
+	participantSet := make(map[string]struct{})
 	for _, addr := range thread.Participants {
-		// Skip if participant equals receiver
-		if strings.EqualFold(addr, string(userLogin.ID)) {
-			continue
+		addr = strings.ToLower(strings.TrimSpace(addr))
+		if addr != "" {
+			participantSet[addr] = struct{}{}
 		}
-		uid := networkid.UserID(fmt.Sprintf("email:%s", strings.TrimSpace(addr)))
-		memberMap[uid] = bridgev2.ChatMember{EventSender: bridgev2.EventSender{Sender: uid}}
+	}
+	monitored := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(string(userLogin.ID), "email:")))
+	if monitored != "" {
+		participantSet[monitored] = struct{}{}
+	}
+	for addr := range participantSet {
+		uid := networkid.UserID(fmt.Sprintf("email:%s", addr))
+		memberMap[uid] = bridgev2.ChatMember{
+			EventSender: bridgev2.EventSender{Sender: uid},
+			Membership:  event.MembershipJoin,
+		}
 	}
 	powerLevels := &bridgev2.PowerLevelOverrides{
 		// Match RoomManager defaults: messages allowed (0), state changes restricted (101)

@@ -42,22 +42,31 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 	// Create member map with read-only power levels
 	memberMap := make(map[networkid.UserID]bridgev2.ChatMember)
 
-	// Add the bridge user with admin permissions
-	// Convert UserLoginID to UserID
-	bridgeUserID := networkid.UserID(userLogin.ID)
-	memberMap[bridgeUserID] = bridgev2.ChatMember{
+	// Add the Matrix user (room owner) using the special empty user ID with IsFromMe: true
+	// This ensures the room is auto-joined instead of inviting the user.
+	memberMap[networkid.UserID("")] = bridgev2.ChatMember{
 		EventSender: bridgev2.EventSender{IsFromMe: true},
 		Membership:  event.MembershipJoin,
 		PowerLevel:  ptr.Ptr(9001), // Bridge bot admin level (matches createRoom overrides)
 	}
 
-	// Add email participants as read-only members
-for _, emailAddr := range thread.Participants {
-		// Skip the bridge user's own email
-		if strings.EqualFold(emailAddr, string(userLogin.ID)) {
-			continue
+	// Build a unique set of participants from the thread plus the monitored email
+	participantSet := make(map[string]struct{})
+	for _, emailAddr := range thread.Participants {
+		addr := strings.ToLower(strings.TrimSpace(emailAddr))
+		if addr != "" {
+			participantSet[addr] = struct{}{}
 		}
+	}
+	// Ensure the monitored email (derived from userLogin.ID without the "email:" prefix) is included
+	monitored := strings.TrimPrefix(string(userLogin.ID), "email:")
+	monitored = strings.ToLower(strings.TrimSpace(monitored))
+	if monitored != "" {
+		participantSet[monitored] = struct{}{}
+	}
 
+	// Add email participants (including monitored email) as read-only ghost members
+	for emailAddr := range participantSet {
 		ghostID := rm.emailToGhostID(emailAddr)
 		memberMap[ghostID] = bridgev2.ChatMember{
 			EventSender: bridgev2.EventSender{Sender: ghostID},
