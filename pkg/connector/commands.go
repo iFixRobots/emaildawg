@@ -1,0 +1,728 @@
+package connector
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/iFixRobots/emaildawg/pkg/imap"
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/commands"
+)
+
+var (
+	HelpSectionAuth  = commands.HelpSection{Name: "Authentication", Order: 10}
+	HelpSectionInfo  = commands.HelpSection{Name: "Information", Order: 5}
+	HelpSectionAdmin = commands.HelpSection{Name: "Administration", Order: 15}
+
+	CommandPing = &commands.FullHandler{
+		Func: fnPing,
+		Name: "ping",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionInfo,
+			Description: "Check if the bridge is alive",
+		},
+	}
+
+	CommandStatus = &commands.FullHandler{
+		Func: fnStatus,
+		Name: "status",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionInfo,
+			Description: "Show bridge and connection status including health, sync status, and recent activity",
+		},
+	}
+
+	CommandLogin = &commands.FullHandler{
+		Func: fnLogin,
+		Name: "login",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAuth,
+			Description: "Connect to an email account using interactive login",
+			Args:        "",
+		},
+	}
+
+	CommandLogout = &commands.FullHandler{
+		Func: fnLogout,
+		Name: "logout",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAuth,
+			Description: "Disconnect from a specific email account or all accounts",
+			Args:        "[<email address>]",
+		},
+		RequiresLogin: true,
+	}
+
+	CommandList = &commands.FullHandler{
+		Func: fnList,
+		Name: "list",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAuth,
+			Description: "List connected email accounts",
+		},
+		RequiresLogin: true,
+	}
+
+	CommandSync = &commands.FullHandler{
+		Func: fnSync,
+		Name: "sync",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAdmin,
+			Description: "Force sync emails from server",
+			Args:        "[account]",
+		},
+		RequiresLogin: true,
+	}
+
+	CommandReconnect = &commands.FullHandler{
+		Func: fnReconnect,
+		Name: "reconnect",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAdmin,
+			Description: "Reconnect to IMAP server for a specific account",
+			Args:        "[\u003cemail address\u003e]",
+		},
+		RequiresLogin: true,
+	}
+
+	// Destructive: Deletes the bridge database immediately. Intended for homeserver-driven deletions.
+	CommandNuke = &commands.FullHandler{
+		Func: fnNuke,
+		Name: "nuke",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAdmin,
+			Description: "Delete all bridge state (database). Requires explicit confirmation: !email nuke confirm",
+			Args:        "[confirm]",
+		},
+		RequiresLogin: false,
+	}
+)
+
+func fnPing(ce *commands.Event) {
+	ce.Reply("🏓 **Pong!** The EmailDawg bridge is alive and running.")
+}
+
+func fnStatus(ce *commands.Event) {
+	logins := ce.User.GetUserLogins()
+
+	if len(logins) == 0 {
+		ce.Reply(`
+**EmailDawg Bridge Status**
+
+**Connection Status:** Not connected
+**Email Accounts:** 0
+**Matrix Rooms:** 0 email rooms
+
+**Bridge is ready!** Use ` + "`!email login`" + ` to connect your first email account.
+`)
+		return
+	}
+
+	// Get real account status from IMAP manager
+	if ConnectorInstance == nil || ConnectorInstance.IMAPManager == nil {
+		ce.Reply("⚠️ **Bridge Error:** IMAP manager not initialized")
+		return
+	}
+
+	accountStatuses := ConnectorInstance.IMAPManager.GetAccountStatus(ce.User.MXID.String())
+
+	if len(accountStatuses) == 0 {
+		ce.Reply(`
+**EmailDawg Bridge Status**
+
+**Connection Status:** No active email connections
+**Email Accounts:** 0 monitoring
+**Matrix Rooms:** 0 email rooms
+
+**Note:** You have bridge login(s) but no active IMAP connections. Use ` + "`!email login`" + ` to add email accounts.
+`)
+		return
+	}
+
+	// Build status report
+	statusMsg := `
+**EmailDawg Bridge Status**
+
+`
+
+	connectedCount := 0
+	idleCount := 0
+
+	for _, status := range accountStatuses {
+		if status.Connected {
+			connectedCount++
+		}
+		if status.IDLEActive {
+			idleCount++
+		}
+
+		var statusIcon string
+		var statusText string
+
+		if status.Connected && status.IDLEActive {
+			statusIcon = "✅"
+			statusText = "Connected, monitoring"
+		} else if status.Connected {
+			statusIcon = "🔄"
+			statusText = "Connected, starting monitoring"
+		} else {
+			statusIcon = "❌"
+			statusText = "Disconnected"
+		}
+
+		statusMsg += fmt.Sprintf("📧 %s **%s** (%s:%d) - %s\n", statusIcon, status.Email, status.Host, status.Port, statusText)
+	}
+
+	statusMsg += fmt.Sprintf(`
+**Summary:**
+**Email Accounts:** %d total, %d connected
+**Real-time Monitoring:** %d active IMAP IDLE sessions
+**Matrix Rooms:** Calculating...
+
+`, len(accountStatuses), connectedCount, idleCount)
+
+	if connectedCount == len(accountStatuses) && idleCount == len(accountStatuses) {
+		statusMsg += "✅ **All systems operational!** Your emails are being monitored in real-time."
+	} else if connectedCount > 0 {
+		statusMsg += "⚠️ **Partial connectivity** - Some accounts may need attention."
+	} else {
+		statusMsg += "❌ **No active connections** - Use `!email login` to reconnect."
+	}
+
+	ce.Reply(statusMsg)
+}
+
+// fnNuke deletes the bridge database files immediately.
+// This is intended to be called by the homeserver/bridge bot during bridge removal.
+func fnNuke(ce *commands.Event) {
+	// Require explicit confirmation to avoid accidental data loss
+	if len(ce.Args) == 0 || strings.ToLower(ce.Args[0]) != "confirm" {
+		ce.Reply("⚠️ This will DELETE the bridge database files and cannot be undone.\nConfirm with: `!email nuke confirm`.")
+		return
+	}
+	if ConnectorInstance == nil {
+		ce.Reply("⚠️ Bridge not initialized.")
+		return
+	}
+	// Stop IMAP to release DB handles
+	if ConnectorInstance.IMAPManager != nil {
+		ConnectorInstance.IMAPManager.StopAll()
+	}
+	// Try common DB file locations based on defaults and documentation
+	candidates := []string{
+		"emaildawg.db",
+		"emaildawg.db-wal",
+		"emaildawg.db-shm",
+		"./data/emaildawg.db",
+		"./data/emaildawg.db-wal",
+		"./data/emaildawg.db-shm",
+		"sh-emaildawg.db",
+		"sh-emaildawg.db-wal",
+		"sh-emaildawg.db-shm",
+	}
+	removed := 0
+	for _, path := range candidates {
+		if err := os.Remove(path); err == nil {
+			removed++
+		}
+	}
+	if removed == 0 {
+		ce.Reply("ℹ️ No bridge DB files found to delete.")
+		return
+	}
+	ce.Reply("🧨 Bridge database deleted (%d file(s)). Please restart the bridge service.", removed)
+}
+
+func fnLogin(ce *commands.Event) {
+	// Check if user has any active logins
+	logins := ce.User.GetUserLogins()
+	if len(logins) > 0 {
+		ce.Reply("✅ You're already logged into %d email account(s). Use `!email list` to see them, or `!email logout` to disconnect.", len(logins))
+		return
+	}
+
+	ctx := context.Background()
+
+	// Check if the user provided arguments in the command
+	args := strings.TrimSpace(ce.RawArgs)
+	if args != "" {
+		// Parse text arguments: email:user@domain.com password:pass or password:"quoted pass"
+		email, password, err := parseLoginArgs(args)
+		if err != nil {
+			ce.Reply("❌ %s\n\n**Usage:** `!email login email:your@email.com password:yourpassword`\n**Or:** `!email login email:your@email.com password:\"password with spaces\"`", err.Error())
+			return
+		}
+
+		// Process the text-based login
+		err = processTextLogin(ctx, ce, email, password)
+		if err != nil {
+			ce.Reply("❌ Login failed: %s", err.Error())
+		}
+		return
+	}
+
+	// Fallback to interactive login process using bridgev2 forms
+	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
+	if err != nil {
+		ce.Reply("❌ Failed to start login process: %s", err.Error())
+		return
+	}
+
+	// Start the login flow
+	step, err := loginProcess.Start(ctx)
+	if err != nil {
+		ce.Reply("❌ Failed to start login: %s", err.Error())
+		return
+	}
+
+	// Send the updated login instructions to the user
+	ce.Reply(buildEnhancedLoginInstructions(step.Instructions))
+}
+
+func fnLogout(ce *commands.Event) {
+	// Check if user has any active logins
+	logins := ce.User.GetUserLogins()
+	if len(logins) == 0 {
+		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
+		return
+	}
+
+	// Check if user specified an email to logout from
+	if len(ce.Args) > 0 {
+		emailAddr := ce.Args[0]
+		ce.Reply("🔌 Disconnecting from **%s**...", emailAddr)
+
+		// Find the specific login for this email
+		var targetLogin *bridgev2.UserLogin
+		for _, login := range logins {
+			if client, ok := login.Client.(*EmailClient); ok && client.Email == emailAddr {
+				targetLogin = login
+				break
+			}
+		}
+
+		if targetLogin == nil {
+			ce.Reply("❌ Email account **%s** not found in your connected accounts.", emailAddr)
+			return
+		}
+
+		// Use LogoutRemote for proper cleanup
+		ctx := context.Background()
+		if client, ok := targetLogin.Client.(*EmailClient); ok {
+			client.LogoutRemote(ctx)
+			ce.Reply("✅ Successfully disconnected from **%s**", emailAddr)
+		} else {
+			ce.Reply("❌ Failed to disconnect from **%s**: invalid client type", emailAddr)
+		}
+		return
+	}
+
+	// Logout all accounts
+	ce.Reply("🔌 Disconnecting from all %d email account(s)...", len(logins))
+
+	// Use LogoutRemote for each login for proper cleanup
+	ctx := context.Background()
+	var failures []string
+
+	for _, login := range logins {
+		if client, ok := login.Client.(*EmailClient); ok {
+			try := func() {
+				client.LogoutRemote(ctx)
+			}
+
+			// Use a simple panic recovery to catch any logout failures
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						failures = append(failures, fmt.Sprintf("LogoutRemote for %s: panic %v", client.Email, r))
+					}
+				}()
+				try()
+			}()
+		} else {
+			failures = append(failures, fmt.Sprintf("Invalid client type for login %s", login.ID))
+		}
+	}
+
+	if len(failures) == 0 {
+		ce.Reply("✅ Successfully disconnected from all email accounts.")
+	} else {
+		ce.Reply("⚠️ Logout completed with some issues:\n• %s", strings.Join(failures, "\n• "))
+	}
+}
+
+func fnList(ce *commands.Event) {
+	// Check if user has any active logins
+	logins := ce.User.GetUserLogins()
+	if len(logins) == 0 {
+		ce.Reply(`
+📭 **No email accounts connected**
+
+To get started:
+1. Use ` + "`!email login`" + ` to connect your first email account
+2. The bridge supports Gmail, Outlook, Yahoo, FastMail, and custom IMAP servers
+3. Once connected, new emails will automatically create Matrix rooms
+
+Need help? Use ` + "`!email help`" + ` for more information.
+`)
+		return
+	}
+
+	// Get real account list from database
+	ctx := context.Background()
+	accounts, err := ConnectorInstance.DB.GetUserAccounts(ctx, ce.User.MXID.String())
+	if err != nil {
+		ce.Reply("❌ Failed to get account list: %s", err.Error())
+		return
+	}
+
+	if len(accounts) == 0 {
+		ce.Reply("📭 No email accounts found in database. Use `!email login` to add one.")
+		return
+	}
+
+	// Get account status from IMAP manager
+	statusMap := make(map[string]imap.AccountStatus)
+	statuses := ConnectorInstance.IMAPManager.GetAccountStatus(ce.User.MXID.String())
+	for _, status := range statuses {
+		statusMap[status.Email] = status
+	}
+
+	// Build response
+	response := fmt.Sprintf("📧 **Connected Email Accounts:** %d\n\n", len(accounts))
+
+	for _, account := range accounts {
+		status, hasStatus := statusMap[account.Email]
+
+		var statusIcon string
+		var statusText string
+		var provider string
+
+		// Determine provider name
+		domain := strings.ToLower(strings.Split(account.Email, "@")[1])
+		if p, ok := imap.CommonProviders[domain]; ok {
+			provider = p.Name
+		} else {
+			provider = "Custom IMAP"
+		}
+
+		if hasStatus {
+			if status.Connected && status.IDLEActive {
+				statusIcon = "✅"
+				statusText = "Connected, monitoring"
+			} else if status.Connected {
+				statusIcon = "🔄"
+				statusText = "Connected, starting monitoring"
+			} else {
+				statusIcon = "❌"
+				statusText = "Disconnected"
+			}
+		} else {
+			statusIcon = "⚠️"
+			statusText = "Status unknown"
+		}
+
+		response += fmt.Sprintf("• %s **%s** (%s) - %s\n", statusIcon, account.Email, provider, statusText)
+		if hasStatus && status.Host != "" {
+			response += fmt.Sprintf("    %s:%d\n", status.Host, status.Port)
+		}
+		response += fmt.Sprintf("    Added: %s\n\n", account.CreatedAt.Format("Jan 2, 2006"))
+	}
+
+	response += "💡 Use `!email logout <email>` to remove a specific account."
+	ce.Reply(response)
+}
+
+func fnSync(ce *commands.Event) {
+	// Get user's logins
+	logins := ce.User.GetUserLogins()
+	if len(logins) == 0 {
+		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
+		return
+	}
+
+	// If specific account provided, sync only that one
+	if len(ce.Args) > 0 {
+		emailAddr := ce.Args[0]
+		var targetLogin *bridgev2.UserLogin
+		for _, login := range logins {
+			if client, ok := login.Client.(*EmailClient); ok && client.Email == emailAddr {
+				targetLogin = login
+				break
+			}
+		}
+
+		if targetLogin == nil {
+			ce.Reply("❌ Email account **%s** not found in your connected accounts.", emailAddr)
+			return
+		}
+
+		ce.Reply("🔄 Forcing sync for **%s**...", emailAddr)
+		if client, ok := targetLogin.Client.(*EmailClient); ok {
+			if client.IMAPClient != nil && client.IMAPClient.IsConnected() {
+				if err := client.IMAPClient.CheckNewMessages(); err != nil {
+					ce.Reply("❌ Sync failed for **%s**: %s", emailAddr, err.Error())
+					return
+				}
+				ce.Reply("✅ Sync completed for **%s**", emailAddr)
+			} else {
+				ce.Reply("⚠️ **%s** is not connected to IMAP server", emailAddr)
+			}
+		}
+		return
+	}
+
+	// Sync all accounts
+	ce.Reply("🔄 Forcing sync for all %d email account(s)...", len(logins))
+	var successes []string
+	var failures []string
+
+	// Create context with timeout for all sync operations
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, login := range logins {
+		if client, ok := login.Client.(*EmailClient); ok {
+			if client.IMAPClient != nil && client.IMAPClient.IsConnected() {
+				// Use channel to handle timeout for each account
+				done := make(chan error, 1)
+				go func() {
+					done <- client.IMAPClient.CheckNewMessages()
+				}()
+
+				select {
+				case err := <-done:
+					if err != nil {
+						failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
+					} else {
+						successes = append(successes, client.Email)
+					}
+				case <-ctx.Done():
+					failures = append(failures, fmt.Sprintf("%s: sync timed out after 60 seconds", client.Email))
+				}
+			} else {
+				failures = append(failures, fmt.Sprintf("%s: not connected", client.Email))
+			}
+		}
+	}
+
+	var result strings.Builder
+	if len(successes) > 0 {
+		result.WriteString(fmt.Sprintf("✅ Successfully synced: %s\n", strings.Join(successes, ", ")))
+	}
+	if len(failures) > 0 {
+		result.WriteString(fmt.Sprintf("❌ Failed to sync: %s", strings.Join(failures, "; ")))
+	}
+
+	ce.Reply(result.String())
+}
+
+func fnReconnect(ce *commands.Event) {
+	// Get user's logins
+	logins := ce.User.GetUserLogins()
+	if len(logins) == 0 {
+		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
+		return
+	}
+
+	// If specific account provided, reconnect only that one
+	if len(ce.Args) > 0 {
+		emailAddr := ce.Args[0]
+		var targetLogin *bridgev2.UserLogin
+		for _, login := range logins {
+			if client, ok := login.Client.(*EmailClient); ok && client.Email == emailAddr {
+				targetLogin = login
+				break
+			}
+		}
+
+		if targetLogin == nil {
+			ce.Reply("❌ Email account **%s** not found in your connected accounts.", emailAddr)
+			return
+		}
+
+		ce.Reply("🔌 Reconnecting **%s**...", emailAddr)
+		if client, ok := targetLogin.Client.(*EmailClient); ok {
+			if client.IMAPClient != nil {
+				if err := client.IMAPClient.Reconnect(); err != nil {
+					ce.Reply("❌ Reconnection failed for **%s**: %s", emailAddr, err.Error())
+					return
+				}
+				// Start IDLE after successful reconnect
+				if err := client.IMAPClient.StartIDLE(); err != nil {
+					ce.Reply("⚠️ Reconnected **%s** but IDLE failed to start: %s", emailAddr, err.Error())
+				} else {
+					ce.Reply("✅ Successfully reconnected **%s**", emailAddr)
+				}
+			} else {
+				ce.Reply("❌ No IMAP client found for **%s**", emailAddr)
+			}
+		}
+		return
+	}
+
+	// Reconnect all accounts
+	ce.Reply("🔌 Reconnecting all %d email account(s)...", len(logins))
+	var successes []string
+	var failures []string
+
+	for _, login := range logins {
+		if client, ok := login.Client.(*EmailClient); ok && client.IMAPClient != nil {
+			if err := client.IMAPClient.Reconnect(); err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
+				continue
+			}
+			if err := client.IMAPClient.StartIDLE(); err != nil {
+				failures = append(failures, fmt.Sprintf("%s: IDLE failed - %s", client.Email, err.Error()))
+			} else {
+				successes = append(successes, client.Email)
+			}
+		}
+	}
+
+	var result strings.Builder
+	if len(successes) > 0 {
+		result.WriteString(fmt.Sprintf("✅ Successfully reconnected: %s\n", strings.Join(successes, ", ")))
+	}
+	if len(failures) > 0 {
+		result.WriteString(fmt.Sprintf("❌ Failed to reconnect: %s", strings.Join(failures, "; ")))
+	}
+
+	ce.Reply(result.String())
+}
+
+// parseLoginArgs parses command arguments in the format: email:user@domain.com password:pass or password:"quoted pass"
+func parseLoginArgs(args string) (email, password string, err error) {
+	// Split by spaces but preserve quoted strings
+	parts := parseQuotedArgs(args)
+
+	for _, part := range parts {
+		if strings.HasPrefix(part, "email:") {
+			email = strings.TrimPrefix(part, "email:")
+		} else if strings.HasPrefix(part, "password:") {
+			password = strings.TrimPrefix(part, "password:")
+		}
+	}
+
+	if email == "" {
+		return "", "", fmt.Errorf("email is required")
+	}
+	if password == "" {
+		return "", "", fmt.Errorf("password is required")
+	}
+
+	// Validate email format
+	if !strings.Contains(email, "@") || !strings.Contains(email, ".") {
+		return "", "", fmt.Errorf("invalid email format")
+	}
+
+	return email, password, nil
+}
+
+// parseQuotedArgs splits arguments while preserving quoted strings
+func parseQuotedArgs(args string) []string {
+	var result []string
+	var current strings.Builder
+	inQuotes := false
+	escaped := false
+
+	for i, r := range args {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '"':
+			inQuotes = !inQuotes
+		case r == ' ' && !inQuotes:
+			if current.Len() > 0 {
+				result = append(result, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteRune(r)
+		}
+
+		// Handle end of string
+		if i == len(args)-1 && current.Len() > 0 {
+			result = append(result, current.String())
+		}
+	}
+
+	return result
+}
+
+// processTextLogin processes a text-based login using the same flow as the interactive login
+func processTextLogin(ctx context.Context, ce *commands.Event, email, password string) error {
+	// Create a login process
+	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
+	if err != nil {
+		return fmt.Errorf("failed to create login process: %w", err)
+	}
+
+	// Cast to our EmailLoginProcess to access internal methods
+	emailLogin, ok := loginProcess.(*EmailLoginProcess)
+	if !ok {
+		return fmt.Errorf("unexpected login process type")
+	}
+
+	// Set the credentials directly
+	emailLogin.email = email
+	emailLogin.username = email
+	emailLogin.password = password
+
+	// Submit the credentials as if they came from form input
+	inputData := map[string]string{
+		"email":    email,
+		"password": password,
+	}
+
+	step, err := emailLogin.SubmitUserInput(ctx, inputData)
+	if err != nil {
+		return err
+	}
+
+	// Send success message
+	ce.Reply(step.Instructions)
+	return nil
+}
+
+// buildEnhancedLoginInstructions enhances the form-based instructions with text command info
+func buildEnhancedLoginInstructions(originalInstructions string) string {
+	// Include original form-based instructions at the top if provided
+	prefix := ""
+	if strings.TrimSpace(originalInstructions) != "" {
+		prefix = strings.TrimSpace(originalInstructions) + "\n\n"
+	}
+	return prefix + `🔐 **Email Bridge Login**
+
+**Method 1: Quick Command**
+` + "`!email login email:your@email.com password:yourpassword`" + `
+` + "`!email login email:your@email.com password:\"password with spaces\"`" + `
+
+**Method 2: Form Fields (if supported by your client)**
+📧 **Please enter your email credentials using the form fields below.**
+
+**Important Notes:**
+• For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
+• The bridge will automatically detect your email provider settings
+• Your password will be encrypted and stored securely
+
+**App Password Setup Guide:**
+**Gmail:** Settings → Security → 2-Step Verification → App passwords
+**Yahoo:** Account Info → Account security → Generate app password  
+**Outlook:** Security → Sign-in options → App passwords
+**iCloud:** Sign-In and Security → App-Specific Passwords
+
+**Popular Providers Supported:**
+✅ Gmail, Yahoo, Outlook, iCloud, FastMail - Auto-configured
+✅ Custom IMAP servers - Auto-detected
+
+*The bridge will test your IMAP connection automatically after you submit your credentials.*
+
+**Need help?** Use ` + "`!email help`" + ` for more information or ` + "`!email status`" + ` to check connection status.`
+}

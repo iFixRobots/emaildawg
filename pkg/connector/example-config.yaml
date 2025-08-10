@@ -1,0 +1,4 @@
+# IMAP connection settings
+imap:
+    # Default timeout for IMAP connections (in seconds)
+    default_timeout: 30

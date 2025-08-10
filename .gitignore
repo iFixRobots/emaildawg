@@ -1,0 +1,105 @@
+# Binaries and build artifacts
+mautrix-emaildawg
+emaildawg
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Configuration and runtime files  
+config.yaml
+registration.yaml
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+
+# Backup files
+*.bak
+*.orig
+*.tmp
+
+# Docker
+.env
+
+# Testing
+coverage.txt
+
+# SQLite auxiliary files (WAL, SHM, journal)
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db.tmp
+
+# Go build/test artifacts
+/dist/
+/build/
+cover.out
+coverage/
+*.coverprofile
+*.cov
+*.pprof
+cpu.prof
+mem.prof
+profile.out
+
+# Docker/compose/env overrides
+/docker-compose.override.yml
+.env.local
+.env.*.local
+.env.test
+.env.development
+.env.production
+
+# Editor/tool caches
+.fleet/
+.direnv/
+.ruff_cache/
+.pytest_cache/
+
+# macOS extras (additional)
+Icon
+.AppleDouble
+.LSOverride
+.apdisk
+.fseventsd
+
+# Sensitive files (avoid committing keys/certs)
+*.pem
+*.key
+*.crt
+*.p12
+*.pkcs12
+*.keystore
+*.asc
+.git-credentials
