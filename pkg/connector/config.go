@@ -36,11 +36,17 @@ type LoggingConfig struct {
 }
 
 // ProcessingConfig holds limits and behaviors for email → Matrix conversion
+// Default values are defined once below and applied at connector startup.
+const DefaultMaxUploadBytes = 25 * 1024 * 1024 // 25 MiB
+
 type ProcessingConfig struct {
 	// Maximum size in bytes for a single media upload. Set 0 to disable the check.
 	MaxUploadBytes int  `yaml:"max_upload_bytes"`
 	// If true, attempt gzip for oversized original HTML/text bodies before attaching.
 	GzipLargeBodies bool `yaml:"gzip_large_bodies"`
+	// If true, send outbound messages from the user's email ghost by default.
+	// If false, attempt to send as the user's Matrix account (double puppet) when available.
+	PreferGhostOutbound bool `yaml:"prefer_ghost_outbound"`
 }
 
 func upgradeConfig(helper up.Helper) {

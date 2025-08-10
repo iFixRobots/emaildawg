@@ -45,7 +45,12 @@ func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Client represents an IMAP connection for a specific email account
+// Client manages IMAP synchronization for a specific email account.
+// It establishes TWO independent IMAP TCP connections:
+// - INBOX connection: runs an IDLE loop for real-time delivery (inbox-only).
+// - Sent connection: runs a parallel IDLE loop on the Sent mailbox (outbound attribution).
+// Both connections operate concurrently and never pause each other.
+// Mailbox-aware processing ensures Sent items are attributed as from-me.
 type Client struct {
 	// Connection details
 	Email    string
@@ -59,12 +64,19 @@ type Client struct {
 	sanitized bool
 	secret    string
 
-	// IMAP client
+	// INBOX IMAP client
 	client     *imapclient.Client
 	connected  bool
 	idling     bool
 	stopIdle   chan struct{}
 	reconnect  chan struct{}
+	
+	// SENT IMAP client (second TCP connection)
+	sentClient    *imapclient.Client
+	sentConnected bool
+	sentIdling    bool // reserved for possible future IDLE on Sent
+	sentStop      chan struct{}
+	sentMu        sync.RWMutex
 	
 	// Startup behavior
 	startupBackfillSeconds   int
@@ -82,7 +94,7 @@ type Client struct {
 	processor  *email.Processor
 
 	// Threading
-	mu         sync.RWMutex
+	mu           sync.RWMutex
 	lastInboxUID imap.UID
 	lastSentUID  imap.UID
 	
@@ -299,7 +311,7 @@ func (c *Client) Disconnect() error {
 		c.idling = false
 	}
 
-	// Close connection
+	// Close INBOX connection
 	if c.client != nil {
 		// Attempt graceful logout with timeout; force-close on timeout
 		done := make(chan error, 1)
@@ -323,7 +335,19 @@ func (c *Client) Disconnect() error {
 	}
 
 	c.connected = false
-	c.log.Info().Msg("Disconnected from IMAP server")
+	c.log.Info().Msg("Disconnected from IMAP server (INBOX)")
+
+	// Close Sent connection
+	c.sentMu.Lock()
+	if c.sentClient != nil {
+		if c.sentStop != nil {
+			select { case <-c.sentStop: default: close(c.sentStop) }
+		}
+		c.sentClient.Close()
+		c.sentClient = nil
+		c.sentConnected = false
+	}
+	c.sentMu.Unlock()
 	
 	return nil
 }
@@ -355,7 +379,7 @@ func (c *Client) StartIDLE() error {
 	}
 
 	// Establish immediate baseline and optional backfill BEFORE starting IDLE (INBOX)
-	if err := c.primeBaselineAndBackfillFor("INBOX", false); err != nil {
+	if err := c.primeBaselineAndBackfillFor(c.client, "INBOX", false); err != nil {
 		c.mu.Lock()
 		c.idling = false
 		c.mu.Unlock()
@@ -389,9 +413,9 @@ func (c *Client) StartIDLE() error {
 	// Start IDLE monitoring in goroutine
 	go c.idleLoop()
 
-	// Start a lightweight Sent-folder polling loop if we have a known Sent folder
+	// Start dedicated Sent connection if configured/available
 	if c.sentFolder != "" {
-		go c.sentPollLoop()
+		go c.ensureSentConnectionAndLoop()
 	}
 
 	return nil
@@ -547,11 +571,9 @@ idleCmd, err := cli.Idle()
 }
 
 // primeBaselineAndBackfill sets lastUID to UIDNEXT-1 and optionally backfills recent messages
-func (c *Client) primeBaselineAndBackfillFor(mailbox string, isSent bool) error {
+func (c *Client) primeBaselineAndBackfillFor(cli *imapclient.Client, mailbox string, isSent bool) error {
 	// Ensure client is available
-	c.mu.RLock()
-	cli := c.client
-	c.mu.RUnlock()
+	// Use provided client handle
 	if cli == nil {
 		return fmt.Errorf("IMAP client not available during primeBaselineAndBackfill")
 	}
@@ -582,13 +604,7 @@ func (c *Client) primeBaselineAndBackfillFor(mailbox string, isSent bool) error 
 	uidSet.AddRange(baseline+1, 0)
 	criteria := imap.SearchCriteria{Since: since, UID: []imap.UIDSet{uidSet}}
 	c.log.Info().Time("since", since).Int("max", c.startupBackfillMax).Str("mailbox", mailbox).Msg("Running startup backfill search")
-	// Re-check client before issuing search
-	c.mu.RLock()
-	cli = c.client
-	c.mu.RUnlock()
-	if cli == nil {
-		return fmt.Errorf("IMAP client became unavailable before backfill search")
-	}
+	// Issue search on the provided client
 	searchCmd := cli.UIDSearch(&criteria, nil)
 	searchData, err := searchCmd.Wait()
 	if err != nil {
@@ -608,7 +624,7 @@ func (c *Client) primeBaselineAndBackfillFor(mailbox string, isSent bool) error 
 		if uid <= baseline {
 			continue
 		}
-		if err := c.processMessage(context.Background(), uid, mailbox); err != nil {
+		if err := c.processMessageWith(context.Background(), cli, uid, mailbox); err != nil {
 			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Startup backfill: failed to process message")
 			continue
 		}
@@ -631,8 +647,13 @@ func (c *Client) primeBaselineAndBackfillFor(mailbox string, isSent bool) error 
 }
 
 // checkNewMessages fetches and processes new messages
-func (c *Client) checkNewMessagesFor(mailbox string, isSent bool) error {
+func (c *Client) checkNewMessagesFor(cli *imapclient.Client, mailbox string, isSent bool) error {
 	c.log.Info().Msg("[SYNC] Starting manual sync - checking for new messages")
+	
+	// Guard against nil client handles to avoid panics
+	if cli == nil {
+		return fmt.Errorf("imap client unavailable for %s", mailbox)
+	}
 	
 	// Get current lastUID safely
 	c.mu.RLock()
@@ -662,7 +683,7 @@ func (c *Client) checkNewMessagesFor(mailbox string, isSent bool) error {
 		c.log.Warn().Msg("First sync policy will SKIP any messages already in INBOX. Consider backfill if needed.")
 		// Get the current highest UID to mark as our starting point
 		c.log.Debug().Str("mailbox", mailbox).Msg("[IMAP] Executing STATUS command to get UIDNext")
-		statusCmd := c.client.Status(mailbox, &imap.StatusOptions{
+statusCmd := cli.Status(mailbox, &imap.StatusOptions{
 			UIDNext: true,
 		})
 statusData, err := statusCmd.Wait()
@@ -701,7 +722,7 @@ statusData, err := statusCmd.Wait()
 	c.log.Debug().Interface("search_criteria", searchCriteria).Msg("Starting IMAP UID search")
 	
 	// Create search command with timeout handling
-	searchCmd := c.client.UIDSearch(&searchCriteria, nil)
+searchCmd := cli.UIDSearch(&searchCriteria, nil)
 	var newUIDs []imap.UID
 	
 	// Wait for search results with timeout
@@ -794,7 +815,7 @@ case <-time.After(30 * time.Second):
 	
 	// Process the new messages
 	for _, uid := range newUIDs {
-		if err := c.processMessage(context.Background(), uid, mailbox); err != nil {
+		if err := c.processMessageWith(context.Background(), cli, uid, mailbox); err != nil {
 			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message - will not reprocess this UID")
 			// Continue processing other messages even if one fails
 			// Note: lastUID was already updated above, so this message won't be reprocessed
@@ -862,7 +883,7 @@ func (c *Client) ensurePortalRoom(ctx context.Context, portal *bridgev2.Portal) 
 }
 
 // processMessage fetches and processes a single email message
-func (c *Client) processMessage(ctx context.Context, uid imap.UID, mailbox string) error {
+func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client, uid imap.UID, mailbox string) error {
 	c.log.Debug().Uint32("uid", uint32(uid)).Msg("Fetching message")
 
 	// Fetch message with headers and body
@@ -882,7 +903,7 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID, mailbox strin
 
 	// Create UID set and execute fetch command
 	uidSet := imap.UIDSetNum(uid)
-	fetchCmd := c.client.Fetch(uidSet, fetchOptions)
+	fetchCmd := cli.Fetch(uidSet, fetchOptions)
 	defer fetchCmd.Close()
 
 	// Process the fetched message
@@ -952,6 +973,16 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID, mailbox strin
 
 		// Queue the event with the bridge framework
 		if !c.login.QueueRemoteEvent(matrixEvent).Success {
+			// Fallback: if outbound and sending as user failed (e.g., no double puppet), retry as ghost
+			if evt, ok := matrixEvent.(*email.EmailMatrixEvent); ok {
+				if emailMessage.IsOutbound {
+					evt.SetPreferGhostForOutbound(true)
+					if c.login.QueueRemoteEvent(evt).Success {
+						c.log.Info().Msg("Re-queued outbound email as ghost sender due to user intent failure")
+						goto queued_success
+					}
+				}
+			}
 			if c.sanitized {
 				c.log.Error().
 					Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).
@@ -976,6 +1007,7 @@ func (c *Client) processMessage(ctx context.Context, uid imap.UID, mailbox strin
 					Msg("Successfully queued email message")
 			}
 		}
+		queued_success:
 	}
 
 	// Wait for fetch to complete
@@ -1138,8 +1170,8 @@ func (c *Client) CheckNewMessages() error {
 		}
 		
 		runSync:
-		// Run the sync for the specified mailbox
-		err := c.checkNewMessagesFor(mailbox, isSent)
+	// Run the sync for the specified mailbox
+		err := c.checkNewMessagesFor(c.client, mailbox, isSent)
 		
 		// Restart IDLE with retry logic (same as startup)
 		c.log.Info().Msg("Restarting IDLE after manual sync")
@@ -1154,7 +1186,7 @@ func (c *Client) CheckNewMessages() error {
 	}
 	
 	// IDLE not running, safe to check messages directly
-	return c.checkNewMessagesFor(mailbox, isSent)
+	return c.checkNewMessagesFor(c.client, mailbox, isSent)
 }
 
 // TestConnection tests if the IMAP connection is healthy by sending a NOOP command
@@ -1241,26 +1273,108 @@ func (c *Client) testConnectionNoLock() error {
 	return c.client.Noop().Wait()
 }
 
-// sentPollLoop periodically polls the Sent mailbox by temporarily pausing INBOX IDLE.
-func (c *Client) sentPollLoop() {
-	if c.sentFolder == "" {
+
+// ensureSentConnectionAndLoop establishes and maintains a second IMAP connection to the
+// Sent mailbox. It primes baseline/backfill and then starts a parallel IDLE loop.
+func (c *Client) ensureSentConnectionAndLoop() {
+	c.sentMu.Lock()
+	if c.sentClient != nil || c.sentFolder == "" {
+		c.sentMu.Unlock()
 		return
 	}
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
+	c.sentStop = make(chan struct{})
+	c.sentMu.Unlock()
+
+	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
+	var conn net.Conn
+	var err error
+	if c.TLS {
+		conn, err = tls.Dial("tcp", addr, &tls.Config{ServerName: c.Host})
+	} else {
+		conn, err = net.Dial("tcp", addr)
+	}
+	if err != nil {
+		c.log.Warn().Err(err).Msg("Failed to establish Sent connection; falling back to legacy polling via INBOX")
+		return
+	}
+
+	cli := imapclient.New(conn, &imapclient.Options{DebugWriter: &IMAPDebugWriter{logger: c.log, sanitized: c.sanitized}})
+	if err := cli.Login(c.Username, c.Password).Wait(); err != nil {
+		c.log.Warn().Err(err).Msg("Sent connection login failed; closing and falling back")
+		conn.Close()
+		return
+	}
+	if _, err := cli.Select(c.sentFolder, nil).Wait(); err != nil {
+		c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Failed to select Sent mailbox on second connection")
+		cli.Close()
+		return
+	}
+
+	// Prime baseline/backfill for Sent on dedicated connection
+	if err := c.primeBaselineAndBackfillFor(cli, c.sentFolder, true); err != nil {
+		c.log.Warn().Err(err).Msg("Failed to prime Sent mailbox on dedicated connection")
+	}
+
+	c.sentMu.Lock()
+	c.sentClient = cli
+	c.sentConnected = true
+	stopCh := c.sentStop
+	c.sentMu.Unlock()
+
+	c.log.Info().Str("mailbox", c.sentFolder).Msg("Started dedicated Sent mailbox connection")
+
+	// Start IDLE loop on dedicated Sent connection
+	go c.sentIdleLoop(cli, stopCh)
+}
+
+// sentIdleLoop runs an IDLE session on the Sent connection in parallel to INBOX.
+// It mirrors the INBOX IDLE logic: IDLE with a periodic timeout to check for new messages,
+// then re-enter IDLE. This keeps Sent attribution timely without affecting INBOX.
+func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
+	c.sentMu.Lock()
+	c.sentIdling = true
+	c.sentMu.Unlock()
+	defer func() {
+		c.sentMu.Lock()
+		c.sentIdling = false
+		c.sentMu.Unlock()
+	}()
+
 	for {
+		// Create IDLE command on Sent
+		idleCmd, err := cli.Idle()
+		if err != nil {
+			c.log.Warn().Err(err).Msg("Sent IDLE start failed; will retry after short delay")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		c.log.Info().Str("mailbox", c.sentFolder).Msg("Sent IDLE started")
+
+		// Use same timeout cycle as INBOX to periodically check messages
+		cycleTimeout := c.idleInterval
+		timer := time.NewTimer(cycleTimeout)
 		select {
-		case <-c.ctx.Done():
+		case <-stopCh:
+			_ = idleCmd.Close()
 			return
-		case <-ticker.C:
-			// Pause IDLE and poll Sent
-			c.StopIDLE()
-			if err := c.checkNewMessagesFor(c.sentFolder, true); err != nil {
-				c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Sent mailbox poll failed")
-			}
-			// Resume INBOX IDLE
-			if err := c.safeStartIDLE(); err != nil {
-				c.log.Warn().Err(err).Msg("Failed to restart IDLE after Sent poll")
+		case <-timer.C:
+			// Close IDLE and check for new messages in Sent
+			_ = idleCmd.Close()
+			if err := c.checkNewMessagesFor(cli, c.sentFolder, true); err != nil {
+				c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Sent check on IDLE timeout failed")
+				// If the error indicates our client handle is bad/unavailable, rebuild Sent connection
+				if strings.Contains(strings.ToLower(err.Error()), "imap client unavailable") || isHardNetErr(err) {
+					c.sentMu.Lock()
+					if c.sentClient != nil {
+						c.sentClient.Close()
+						c.sentClient = nil
+					}
+					c.sentConnected = false
+					c.sentMu.Unlock()
+					go c.ensureSentConnectionAndLoop()
+					// Small backoff before next loop iteration
+					time.Sleep(2 * time.Second)
+				}
 			}
 		}
 	}

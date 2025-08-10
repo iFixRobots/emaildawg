@@ -38,6 +38,11 @@ type Processor struct {
 	sanitized bool
 	secret    string
 
+	// Behavior: when true, outbound messages will use the email ghost by default
+	// instead of attempting to send as the Matrix user (double puppet). This avoids
+	// falling back to the bot when the user token is missing/invalid.
+	PreferGhostOutbound bool
+
 	// MaxUploadBytes limits individual media uploads to Matrix. Items larger than this
 	// will either be gzipped (for text/html and text/plain bodies) or skipped with a notice.
 	MaxUploadBytes int
@@ -48,13 +53,14 @@ type Processor struct {
 // NewProcessor creates a new email processor
 func NewProcessor(log *zerolog.Logger, threadManager *ThreadManager, sanitized bool, secret string) *Processor {
 	logger := log.With().Str("component", "email_processor").Logger()
-	return &Processor{
-		log:             &logger,
-		threadManager:   threadManager,
-		sanitized:       sanitized,
-		secret:         secret,
-		MaxUploadBytes: 10 * 1024 * 1024, // 10 MiB default; can be made configurable later
-		GzipLargeBodies: true,
+return &Processor{
+		log:                &logger,
+		threadManager:      threadManager,
+		sanitized:          sanitized,
+		secret:            secret,
+		PreferGhostOutbound: true, // default to ghost for outbound until double puppet is configured
+		MaxUploadBytes: 0, // set by connector; 0 means unlimited unless overridden
+		GzipLargeBodies:    true,
 	}
 }
 
@@ -113,8 +119,25 @@ func (p *Processor) ProcessIMAPMessage(ctx context.Context, fetchData *imapclien
 	// Step 3: Create network message ID
 	networkMessageID := networkid.MessageID(fmt.Sprintf("email:%s", parsedEmail.MessageID))
 
-// Step 4: Check if this is an outbound message (sent by the bridge user)
-	isOutbound := p.isOutboundMessage(parsedEmail, userLogin, mailbox)
+	// Step 4: Check if this is an outbound message (sent by the bridge user)
+	isOutbound := p.isOutboundMessage(mailbox)
+
+	// Attribution diagnostics
+	if p.sanitized {
+		p.log.Debug().
+			Str("mailbox", mailbox).
+			Bool("is_outbound", isOutbound).
+			Str("from_masked", logging.MaskEmail(parsedEmail.From)).
+			Str("ghost_masked", logging.MaskEmail(string(common.EmailToGhostID(extractEmailAddress(parsedEmail.From))))).
+			Msg("Attribution decision")
+	} else {
+		p.log.Debug().
+			Str("mailbox", mailbox).
+			Bool("is_outbound", isOutbound).
+			Str("from", parsedEmail.From).
+			Str("ghost", string(common.EmailToGhostID(extractEmailAddress(parsedEmail.From)))).
+			Msg("Attribution decision")
+	}
 
 	emailMessage := &EmailMessage{
 		ParsedEmail: parsedEmail,
@@ -629,7 +652,7 @@ func formatIMAPAddressSlice(addrs []imap.Address) []string {
 // isOutboundMessage determines if this email was sent by the bridge user.
 // Currently, we only process the INBOX, so all processed emails are treated as inbound.
 // When Sent-folder processing is added, this can be revisited with mailbox context.
-func (p *Processor) isOutboundMessage(email *ParsedEmail, userLogin *bridgev2.UserLogin, mailbox string) bool {
+func (p *Processor) isOutboundMessage(mailbox string) bool {
 	mb := strings.ToLower(strings.TrimSpace(mailbox))
 	// Treat messages from any “Sent” mailbox variant as outbound.
 	if mb == "" {
@@ -644,10 +667,11 @@ func (p *Processor) isOutboundMessage(email *ParsedEmail, userLogin *bridgev2.Us
 
 // ToMatrixEvent converts an EmailMessage to a bridgev2 RemoteMessage event
 func (p *Processor) ToMatrixEvent(ctx context.Context, emailMsg *EmailMessage, userLogin *bridgev2.UserLogin) bridgev2.RemoteMessage {
-	return &EmailMatrixEvent{
-		emailMessage: emailMsg,
-		userLogin:    userLogin,
-		processor:    p,
+return &EmailMatrixEvent{
+		emailMessage:        emailMsg,
+		userLogin:           userLogin,
+		processor:           p,
+		preferGhostIfFromMe: p.PreferGhostOutbound,
 	}
 }
 
@@ -668,6 +692,12 @@ type EmailMatrixEvent struct {
 	emailMessage *EmailMessage
 	userLogin    *bridgev2.UserLogin
 	processor    *Processor
+	preferGhostIfFromMe bool
+}
+
+// SetPreferGhostForOutbound forces outbound messages to use the user's email ghost instead of IsFromMe.
+func (e *EmailMatrixEvent) SetPreferGhostForOutbound(prefer bool) {
+	e.preferGhostIfFromMe = prefer
 }
 
 // Implement bridgev2.RemoteMessage interface
@@ -681,11 +711,33 @@ func (e *EmailMatrixEvent) GetTimestamp() time.Time {
 
 func (e *EmailMatrixEvent) GetSender() bridgev2.EventSender {
 	if e.emailMessage.IsOutbound {
+		if e.preferGhostIfFromMe {
+			fromEmail := extractEmailAddress(e.userLogin.RemoteName)
+			if strings.TrimSpace(fromEmail) == "" {
+				fromEmail = extractEmailAddress(e.emailMessage.From)
+			}
+			if strings.TrimSpace(fromEmail) == "" {
+				fromEmail = "unknown"
+			}
+			ghostID := common.EmailToGhostID(fromEmail)
+			return bridgev2.EventSender{Sender: ghostID}
+		}
 		return bridgev2.EventSender{IsFromMe: true}
 	}
 	
-	// Create ghost sender for the email sender  
+	// Create ghost sender for the email sender
 	fromEmail := extractEmailAddress(e.emailMessage.From)
+	if strings.TrimSpace(fromEmail) == "" {
+		// Fallback to a deterministic placeholder rather than letting the bridge default to bot
+		fromEmail = "unknown"
+		if e.processor != nil {
+			if e.processor.sanitized {
+				e.processor.log.Debug().Msg("Sender email missing/unparsable; using fallback ghost email:unknown")
+			} else {
+				e.processor.log.Debug().Msg("Sender email missing/unparsable; using fallback ghost email:unknown")
+			}
+		}
+	}
 	ghostID := common.EmailToGhostID(fromEmail)
 	return bridgev2.EventSender{Sender: ghostID}
 }

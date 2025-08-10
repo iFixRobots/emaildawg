@@ -125,6 +125,7 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	}
 
 	// Automatically connect the client after loading
+	// Outbound attribution preference is controlled via config/env at startup.
 	go emailClient.Connect(ctx)
 
 	// Register client with IMAP manager for status reporting

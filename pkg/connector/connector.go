@@ -67,8 +67,9 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 			PseudonymSecret: "",
 		},
 		Processing: ProcessingConfig{
-			MaxUploadBytes:  10 * 1024 * 1024,
-			GzipLargeBodies: true,
+			MaxUploadBytes:      DefaultMaxUploadBytes,
+			GzipLargeBodies:     true,
+			PreferGhostOutbound: true,
 		},
 	}
 
@@ -148,6 +149,11 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		ec.Processor.MaxUploadBytes = ec.Config.Processing.MaxUploadBytes
 	}
 	ec.Processor.GzipLargeBodies = ec.Config.Processing.GzipLargeBodies
+	// Prefer ghost for outbound can be overridden by config or env
+	if env := strings.ToLower(os.Getenv("EMAILDAWG_PREFER_GHOST_OUTBOUND")); env != "" {
+		ec.Config.Processing.PreferGhostOutbound = env == "1" || env == "true" || env == "yes"
+	}
+	ec.Processor.PreferGhostOutbound = ec.Config.Processing.PreferGhostOutbound
 	ec.IMAPManager.SetProcessor(ec.Processor)
 	
 	// Add commands
