@@ -12,29 +12,25 @@ services:
     #
     volumes:
       - ./config.yaml:/opt/emaildawg/config.yaml:ro
-      - ./registration.yaml:/opt/emaildawg/registration.yaml:ro
       - emaildawg_data:/home/nonroot/app/data
-    ports:
-      - "29319:29319"
-    depends_on:
-      - postgres
     environment:
       - MAUTRIX_CONFIG_PATH=/opt/emaildawg/config.yaml
     networks:
       - mautrix
 
-  # Optional: PostgreSQL database (remove if using SQLite)
-  postgres:
-    image: postgres:15-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: mautrix_emaildawg
-      POSTGRES_PASSWORD: your_secure_password_here
-      POSTGRES_DB: mautrix_emaildawg
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - mautrix
+  # Optional example: PostgreSQL database
+  # Uncomment this block and configure database.type/uri in config.yaml if you prefer Postgres.
+  # postgres:
+  #   image: postgres:15-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: mautrix_emaildawg
+  #     POSTGRES_PASSWORD: change_me
+  #     POSTGRES_DB: mautrix_emaildawg
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - mautrix
 
 volumes:
   emaildawg_data:

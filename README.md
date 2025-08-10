@@ -24,89 +24,78 @@ This project is usable and under active development. Core features work and the 
 
 ## Quick start
 
-### One-command setup (Bridge Manager)
+You can run EmailDawg in two supported ways. Pick one and follow it end-to-end.
+
+### A) With Beeper Bridge Manager (recommended for Beeper)
+Prerequisites:
+- bbctl installed and logged in: `bbctl login`
+- Go 1.22+ and libolm installed (for building this bridge)
+
+Steps:
 ```bash
+# Get the source and build
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
 ./setup.sh
-```
-This script builds the bridge and generates a Bridge Manager config at ./data/config.yaml via `bbctl`.
 
-### Bridge Manager (manual)
+# Edit the generated config if needed
+sed -n '1,160p' ./data/config.yaml
+
+# Run the bridge using the local binary and the bbctl-generated config
+./emaildawg --config ./data/config.yaml
+```
+Notes:
+- setup.sh builds the bridge and generates a bridgev2 config at ./data/config.yaml using `bbctl config` so it matches Bridge Manager conventions (hungry websocket, encryption defaults, double puppeting secrets, etc.).
+- No registration.yaml is required when using Beeper’s appservice websocket (the default in the generated config).
+- To run the bridge under a process manager, point it to `./emaildawg --config ./data/config.yaml`.
+- bbctl is only used to generate the config and manage Beeper auth. It does not run this bridge; start it yourself using the local binary or Docker.
+- Important: Use the generic bridgev2 template with a custom bridge name. Run `bbctl config --type bridgev2 --output ./data/config.yaml sh-emaildawg-local`. Do not use a per-bridge name unless it’s officially supported by your bbctl build.
+
+### B) Standalone (no Bridge Manager)
+Prerequisites:
+- Go 1.22+
+- libolm
+- A Matrix homeserver you control (standard mode) or Beeper hungryserv (websocket mode)
+
+Steps:
 ```bash
-bbctl register sh-emaildawg https://github.com/iFixRobots/emaildawg
-bbctl run sh-emaildawg
+git clone https://github.com/iFixRobots/emaildawg
+cd emaildawg
+make build
+./emaildawg --generate-example-config
+# Edit config.yaml with your homeserver details
+# If you are using a standard homeserver over HTTP appservice:
+#   ./emaildawg --generate-registration
+#   Add registration.yaml to your homeserver and set appservice -> address/hostname/port accordingly.
+./emaildawg
 ```
 
-### Docker Compose
-Recommended when running with SQLite (default). The image runs as a non-root user and writes to /home/nonroot/app/data inside the container (mapped to a named volume by compose).
+### C) Docker Compose (standalone)
+Use this if you want to run the compiled image with SQLite (default). This flow does not use Bridge Manager.
 
 ```bash
 git clone https://github.com/iFixRobots/emaildawg
 cd emaildawg
-# Generate config and registration in the project root
 make build
 ./emaildawg --generate-example-config
-./emaildawg --generate-registration
-# Edit config.yaml with your Matrix homeserver details
-# Note: The default SQLite DB path is file:./data/emaildawg.db (inside the container).
-# docker-compose creates a named volume mounted at /home/nonroot/app/data automatically.
+# Edit config.yaml, especially database.uri for container path (see below)
 
 docker-compose up -d
 ```
 
 Notes:
 - Config path: docker-compose mounts ./config.yaml into /opt/emaildawg/config.yaml and sets MAUTRIX_CONFIG_PATH accordingly.
-- Data path: no need to create ./data on the host. The container writes to /home/nonroot/app/data, a volume owned by the nonroot user.
-- Postgres: optional. By default, the bridge uses SQLite. The compose file includes a Postgres service as an example only.
-
-### Manual build (host)
-
-Prerequisites:
-- Go 1.22+
-- libolm (for end-to-end encryption)
-- Matrix homeserver access
-
-Install libolm on macOS (Homebrew):
-```bash
-brew install libolm
-```
-
-On Ubuntu/Debian:
-```bash
-sudo apt install libolm-dev build-essential
-```
-
-On Fedora:
-```bash
-sudo dnf install libolm-devel gcc
-```
-
-On Arch:
-```bash
-sudo pacman -S libolm base-devel
-```
-
-Build and run:
-```bash
-git clone https://github.com/iFixRobots/emaildawg
-cd emaildawg
-make build
-./emaildawg --generate-example-config
-./emaildawg --generate-registration
-# Edit config.yaml with your homeserver details
-# Register registration.yaml with your Matrix homeserver
-./emaildawg
-```
+- Registration: NOT needed when using websocket mode. Only generate and mount registration.yaml if you run in HTTP appservice mode on a standard homeserver.
+- Data path: The container writes to /home/nonroot/app/data, a volume owned by the nonroot user. No need to create ./data on the host.
+- Postgres: optional. The compose file focuses on SQLite. Add Postgres yourself if desired.
 
 ## Configuration
 
-Initial setup:
-1. Generate configuration: `./emaildawg --generate-example-config`
-2. Edit homeserver settings in config.yaml
-3. Generate registration: `./emaildawg --generate-registration`
-4. Register with your homeserver (add registration.yaml to the homeserver config)
-5. Start the bridge
+Initial setup (summary):
+1. Generate a config (with setup.sh via Bridge Manager or with `--generate-example-config`).
+2. Edit homeserver settings in config.yaml.
+3. If using a standard homeserver over HTTP appservice, generate and register registration.yaml with your homeserver.
+4. Start the bridge.
 
 User commands (send in DM to the bot):
 - `!email login` — Add an email account (guided)
@@ -116,8 +105,8 @@ User commands (send in DM to the bot):
 - `!email ping` — Health check
 
 Deployment-specific paths:
-- Docker Compose: place config.yaml and registration.yaml in the project root; compose mounts them read-only into the container.
-- Bridge Manager: setup.sh/`bbctl` writes ./data/config.yaml by default; follow bbctl’s guidance to run.
+- Docker Compose: place config.yaml in the project root; compose mounts it read-only into the container. registration.yaml is only needed for HTTP appservice mode.
+- Bridge Manager: setup.sh writes ./data/config.yaml; run the binary with `--config ./data/config.yaml`.
 
 ### Database configuration (IMPORTANT)
 The bridge needs a persistent database path. If you use SQLite (default), set the database URI to the data folder used by your deployment mode.
