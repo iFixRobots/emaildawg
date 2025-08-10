@@ -9,6 +9,3 @@ email_processing:
     max_upload_bytes: 26214400
     # Attempt gzip for oversized original HTML/text bodies before attaching
     gzip_large_bodies: true
-    # When true, send outbound (Sent) messages from the user's email ghost by default.
-    # Set to false if you have a valid Matrix user token configured for double puppet.
-    prefer_ghost_outbound: true

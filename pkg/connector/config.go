@@ -44,9 +44,6 @@ type ProcessingConfig struct {
 	MaxUploadBytes int  `yaml:"max_upload_bytes"`
 	// If true, attempt gzip for oversized original HTML/text bodies before attaching.
 	GzipLargeBodies bool `yaml:"gzip_large_bodies"`
-	// If true, send outbound messages from the user's email ghost by default.
-	// If false, attempt to send as the user's Matrix account (double puppet) when available.
-	PreferGhostOutbound bool `yaml:"prefer_ghost_outbound"`
 }
 
 func upgradeConfig(helper up.Helper) {

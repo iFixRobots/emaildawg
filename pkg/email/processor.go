@@ -38,10 +38,6 @@ type Processor struct {
 	sanitized bool
 	secret    string
 
-	// Behavior: when true, outbound messages will use the email ghost by default
-	// instead of attempting to send as the Matrix user (double puppet). This avoids
-	// falling back to the bot when the user token is missing/invalid.
-	PreferGhostOutbound bool
 
 	// MaxUploadBytes limits individual media uploads to Matrix. Items larger than this
 	// will either be gzipped (for text/html and text/plain bodies) or skipped with a notice.
@@ -54,13 +50,12 @@ type Processor struct {
 func NewProcessor(log *zerolog.Logger, threadManager *ThreadManager, sanitized bool, secret string) *Processor {
 	logger := log.With().Str("component", "email_processor").Logger()
 return &Processor{
-		log:                &logger,
-		threadManager:      threadManager,
-		sanitized:          sanitized,
-		secret:            secret,
-		PreferGhostOutbound: true, // default to ghost for outbound until double puppet is configured
+		log:           &logger,
+		threadManager: threadManager,
+		sanitized:     sanitized,
+		secret:       secret,
 		MaxUploadBytes: 0, // set by connector; 0 means unlimited unless overridden
-		GzipLargeBodies:    true,
+		GzipLargeBodies: true,
 	}
 }
 
@@ -668,10 +663,9 @@ func (p *Processor) isOutboundMessage(mailbox string) bool {
 // ToMatrixEvent converts an EmailMessage to a bridgev2 RemoteMessage event
 func (p *Processor) ToMatrixEvent(ctx context.Context, emailMsg *EmailMessage, userLogin *bridgev2.UserLogin) bridgev2.RemoteMessage {
 return &EmailMatrixEvent{
-		emailMessage:        emailMsg,
-		userLogin:           userLogin,
-		processor:           p,
-		preferGhostIfFromMe: p.PreferGhostOutbound,
+		emailMessage: emailMsg,
+		userLogin:    userLogin,
+		processor:   p,
 	}
 }
 
@@ -692,13 +686,8 @@ type EmailMatrixEvent struct {
 	emailMessage *EmailMessage
 	userLogin    *bridgev2.UserLogin
 	processor    *Processor
-	preferGhostIfFromMe bool
 }
 
-// SetPreferGhostForOutbound forces outbound messages to use the user's email ghost instead of IsFromMe.
-func (e *EmailMatrixEvent) SetPreferGhostForOutbound(prefer bool) {
-	e.preferGhostIfFromMe = prefer
-}
 
 // Implement bridgev2.RemoteMessage interface
 func (e *EmailMatrixEvent) GetID() networkid.MessageID {
@@ -711,17 +700,8 @@ func (e *EmailMatrixEvent) GetTimestamp() time.Time {
 
 func (e *EmailMatrixEvent) GetSender() bridgev2.EventSender {
 	if e.emailMessage.IsOutbound {
-		if e.preferGhostIfFromMe {
-			fromEmail := extractEmailAddress(e.userLogin.RemoteName)
-			if strings.TrimSpace(fromEmail) == "" {
-				fromEmail = extractEmailAddress(e.emailMessage.From)
-			}
-			if strings.TrimSpace(fromEmail) == "" {
-				fromEmail = "unknown"
-			}
-			ghostID := common.EmailToGhostID(fromEmail)
-			return bridgev2.EventSender{Sender: ghostID}
-		}
+		// Always send as the user's Matrix account when the message is from Sent mailbox.
+		// The bridge will use the per-user intent (double puppet) when available.
 		return bridgev2.EventSender{IsFromMe: true}
 	}
 	

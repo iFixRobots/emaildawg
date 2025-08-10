@@ -973,16 +973,6 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 
 		// Queue the event with the bridge framework
 		if !c.login.QueueRemoteEvent(matrixEvent).Success {
-			// Fallback: if outbound and sending as user failed (e.g., no double puppet), retry as ghost
-			if evt, ok := matrixEvent.(*email.EmailMatrixEvent); ok {
-				if emailMessage.IsOutbound {
-					evt.SetPreferGhostForOutbound(true)
-					if c.login.QueueRemoteEvent(evt).Success {
-						c.log.Info().Msg("Re-queued outbound email as ghost sender due to user intent failure")
-						goto queued_success
-					}
-				}
-			}
 			if c.sanitized {
 				c.log.Error().
 					Str("message_id_hash", logging.HashHMAC(string(emailMessage.MessageID), c.secret, 10)).
@@ -1007,7 +997,6 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 					Msg("Successfully queued email message")
 			}
 		}
-		queued_success:
 	}
 
 	// Wait for fetch to complete
