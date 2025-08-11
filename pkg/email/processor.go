@@ -81,6 +81,10 @@ func (p *Processor) ProcessIMAPMessage(ctx context.Context, fetchData *imapclien
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse IMAP fetch data: %w", err)
 	}
+	// Guard against degraded parse that lacks basic identity/threading info
+	if strings.TrimSpace(parsedEmail.From) == "" || strings.TrimSpace(parsedEmail.MessageID) == "" {
+		return nil, fmt.Errorf("degraded parse: missing from/message-id")
+	}
 
 	if p.sanitized {
 		p.log.Debug().

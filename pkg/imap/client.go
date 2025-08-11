@@ -97,6 +97,9 @@ type Client struct {
 	mu           sync.RWMutex
 	lastInboxUID imap.UID
 	lastSentUID  imap.UID
+	// In-flight UID de-duplication per mailbox
+	inFlightInbox map[imap.UID]struct{}
+	inFlightSent  map[imap.UID]struct{}
 	
 	// Circuit breaker for connection failures
 	failureCount int
@@ -219,6 +222,9 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		firstIdleCycle:         true,
 		// Mailbox management
 		sentFolder:             detectSentFolderForProvider(domain),
+		// In-flight maps
+		inFlightInbox:          make(map[imap.UID]struct{}),
+		inFlightSent:           make(map[imap.UID]struct{}),
 	}, nil
 }
 
@@ -815,11 +821,17 @@ case <-time.After(30 * time.Second):
 	
 	// Process the new messages
 	for _, uid := range newUIDs {
+		// De-duplicate concurrent processing of the same UID
+		if !c.startUID(uid, isSent) {
+			c.log.Debug().Uint32("uid", uint32(uid)).Str("mailbox", mailbox).Msg("UID is already being processed, skipping")
+			continue
+		}
 		if err := c.processMessageWith(context.Background(), cli, uid, mailbox); err != nil {
 			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message - will not reprocess this UID")
 			// Continue processing other messages even if one fails
 			// Note: lastUID was already updated above, so this message won't be reprocessed
 		}
+		c.endUID(uid, isSent)
 	}
 	
 	c.log.Info().Str("mailbox", mailbox).Msg("Sync completed successfully")
@@ -919,10 +931,36 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 			return nil
 		}
 
-		// Process the message using the email processor
+		// Process the message using the email processor, with a one-time degraded-parse retry
 		emailMessage, err := c.processor.ProcessIMAPMessage(ctx, msg, c.login, mailbox)
 		if err != nil {
-			return fmt.Errorf("failed to process IMAP message: %w", err)
+			// If processor reports a degraded parse (missing From/Message-ID), try a short retry
+			if strings.Contains(strings.ToLower(err.Error()), "degraded parse") {
+				c.log.Warn().Uint32("uid", uint32(uid)).Str("mailbox", mailbox).Msg("Degraded parse detected, retrying fetch once")
+				// brief delay to allow server to settle
+				time.Sleep(200 * time.Millisecond)
+				// Re-fetch
+				refetchOpts := &imap.FetchOptions{
+					Envelope:      true,
+					BodyStructure: &imap.FetchItemBodyStructure{},
+					Flags:         true,
+					UID:           true,
+					BodySection: []*imap.FetchItemBodySection{
+						{Specifier: imap.PartSpecifierHeader},
+						{Specifier: imap.PartSpecifierText},
+						{Specifier: imap.PartSpecifierNone},
+					},
+				}
+				refetch := cli.Fetch(imap.UIDSetNum(uid), refetchOpts)
+				defer refetch.Close()
+				if m := refetch.Next(); m != nil {
+					emailMessage, err = c.processor.ProcessIMAPMessage(ctx, m, c.login, mailbox)
+				}
+			}
+			if err != nil {
+				// Drop the event instead of creating a bad portal/room on degraded parse
+				return fmt.Errorf("failed to process IMAP message: %w", err)
+			}
 		}
 
 		// Convert to Matrix event and queue it
@@ -1390,6 +1428,34 @@ func (c *Client) triggerReconnect() {
 	select {
 	case c.reconnect <- struct{}{}:
 	default:
+	}
+}
+
+// startUID marks a UID as in-flight and returns true if we acquired it.
+func (c *Client) startUID(uid imap.UID, isSent bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var m map[imap.UID]struct{}
+	if isSent {
+		m = c.inFlightSent
+	} else {
+		m = c.inFlightInbox
+	}
+	if _, ok := m[uid]; ok {
+		return false
+	}
+	m[uid] = struct{}{}
+	return true
+}
+
+// endUID clears a UID from in-flight map.
+func (c *Client) endUID(uid imap.UID, isSent bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if isSent {
+		delete(c.inFlightSent, uid)
+	} else {
+		delete(c.inFlightInbox, uid)
 	}
 }
 
