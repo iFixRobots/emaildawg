@@ -72,11 +72,13 @@ type Client struct {
 	reconnect  chan struct{}
 	
 	// SENT IMAP client (second TCP connection)
-	sentClient    *imapclient.Client
-	sentConnected bool
-	sentIdling    bool // reserved for possible future IDLE on Sent
-	sentStop      chan struct{}
-	sentMu        sync.RWMutex
+	sentClient       *imapclient.Client
+	sentConnected    bool
+	sentIdling       bool // reserved for possible future IDLE on Sent
+	sentStop         chan struct{}
+	sentMu           sync.RWMutex
+	sentFailureCount int
+	sentLastFailure  time.Time
 	
 	// Startup behavior
 	startupBackfillSeconds   int
@@ -106,6 +108,11 @@ type Client struct {
 	lastFailure  time.Time
 	maxFailures  int
 	backoffTime  time.Duration
+
+	// Bridge state throttling
+	lastStateEvent status.BridgeStateEvent
+	lastStateError status.BridgeStateErrorCode
+	lastStateTime  time.Time
 	
 	// Resource management
 	ctx        context.Context
@@ -477,14 +484,12 @@ func (c *Client) idleLoop() {
 			if err := c.runIDLE(); err != nil {
 				c.log.Error().Err(err).Msg("IDLE failed, performing full reconnect")
 				// Demote bridge state for this login while we attempt recovery
-				if c.login != nil {
-					c.login.BridgeState.Send(status.BridgeState{
-						StateEvent: status.StateUnknownError,
-						Source:     "network",
-						Info:       map[string]any{"component": "imap", "reason": "idle_failed"},
-						TTL:        300,
-					})
-				}
+				c.sendBridgeState(status.BridgeState{
+					StateEvent: status.StateUnknownError,
+					Source:     "network",
+					Info:       map[string]any{"component": "imap", "reason": "idle_failed"},
+					TTL:        300,
+				})
 				if recErr := c.reconnectClient(); recErr != nil {
 					c.log.Error().Err(recErr).Msg("Reconnect after IDLE failure failed")
 					// Back off before trying again
@@ -493,9 +498,7 @@ func (c *Client) idleLoop() {
 				}
 				c.log.Info().Msg("Reconnected successfully after IDLE failure")
 				// Promote bridge state back to connected after successful reconnect
-				if c.login != nil {
-					c.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-				}
+				c.sendBridgeState(status.BridgeState{StateEvent: status.StateConnected})
 				continue
 			}
 		}
@@ -1310,30 +1313,36 @@ func (c *Client) ensureSentConnectionAndLoop() {
 		return
 	}
 	c.sentStop = make(chan struct{})
+	c.sentFailureCount = 0
 	c.sentMu.Unlock()
 
-	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
-	var conn net.Conn
-	var err error
-	if c.TLS {
-		conn, err = tls.Dial("tcp", addr, &tls.Config{ServerName: c.Host})
-	} else {
-		conn, err = net.Dial("tcp", addr)
-	}
-	if err != nil {
-		c.log.Warn().Err(err).Msg("Failed to establish Sent connection; falling back to legacy polling via INBOX")
-		return
+	rebuild := func() (*imapclient.Client, error) {
+		addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
+		var conn net.Conn
+		var err error
+		if c.TLS {
+			conn, err = tls.Dial("tcp", addr, &tls.Config{ServerName: c.Host})
+		} else {
+			conn, err = net.Dial("tcp", addr)
+		}
+		if err != nil {
+			return nil, err
+		}
+		cli := imapclient.New(conn, &imapclient.Options{DebugWriter: &IMAPDebugWriter{logger: c.log, sanitized: c.sanitized}})
+		if err := cli.Login(c.Username, c.Password).Wait(); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		if _, err := cli.Select(c.sentFolder, nil).Wait(); err != nil {
+			cli.Close()
+			return nil, err
+		}
+		return cli, nil
 	}
 
-	cli := imapclient.New(conn, &imapclient.Options{DebugWriter: &IMAPDebugWriter{logger: c.log, sanitized: c.sanitized}})
-	if err := cli.Login(c.Username, c.Password).Wait(); err != nil {
-		c.log.Warn().Err(err).Msg("Sent connection login failed; closing and falling back")
-		conn.Close()
-		return
-	}
-	if _, err := cli.Select(c.sentFolder, nil).Wait(); err != nil {
-		c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Failed to select Sent mailbox on second connection")
-		cli.Close()
+	cli, err := rebuild()
+	if err != nil {
+		c.log.Warn().Err(err).Msg("Failed to establish Sent connection; falling back to legacy polling via INBOX")
 		return
 	}
 
@@ -1352,6 +1361,8 @@ func (c *Client) ensureSentConnectionAndLoop() {
 
 	// Start IDLE loop on dedicated Sent connection
 	go c.sentIdleLoop(cli, stopCh)
+	// Start periodic health checker for Sent
+	go c.sentHealthLoop(stopCh)
 }
 
 // sentIdleLoop runs an IDLE session on the Sent connection in parallel to INBOX.
@@ -1367,10 +1378,40 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 		c.sentMu.Unlock()
 	}()
 
+	reconnectSent := func(reason error) {
+		// Exponential backoff with jitter for Sent-only failures
+		c.sentMu.Lock()
+		c.sentFailureCount++
+		c.sentLastFailure = time.Now()
+		failureCount := c.sentFailureCount
+		if c.sentClient != nil {
+			c.sentClient.Close()
+			c.sentClient = nil
+		}
+		c.sentConnected = false
+		stopChLocal := c.sentStop
+		c.sentMu.Unlock()
+		if stopChLocal != nil {
+			select { case <-stopChLocal: default: }
+		}
+		base := time.Duration(failureCount) * 5 * time.Second
+		if base > 5*time.Minute { base = 5 * time.Minute }
+		jitter := time.Duration((rand.Float64()*0.4 - 0.2) * float64(base))
+		backoff := base + jitter
+		if backoff < 0 { backoff = base }
+		c.log.Warn().Dur("backoff", backoff).Err(reason).Msg("Rebuilding Sent connection after failure")
+		time.Sleep(backoff)
+		go c.ensureSentConnectionAndLoop()
+	}
+
 	for {
 		// Create IDLE command on Sent
 		idleCmd, err := cli.Idle()
 		if err != nil {
+			if isHardNetErr(err) || strings.Contains(strings.ToLower(err.Error()), "already running") {
+				reconnectSent(err)
+				return
+			}
 			c.log.Warn().Err(err).Msg("Sent IDLE start failed; will retry after short delay")
 			time.Sleep(5 * time.Second)
 			continue
@@ -1389,18 +1430,10 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 			_ = idleCmd.Close()
 			if err := c.checkNewMessagesFor(cli, c.sentFolder, true); err != nil {
 				c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Sent check on IDLE timeout failed")
-				// If the error indicates our client handle is bad/unavailable, rebuild Sent connection
+				// If client handle is bad/unavailable, rebuild Sent connection
 				if strings.Contains(strings.ToLower(err.Error()), "imap client unavailable") || isHardNetErr(err) {
-					c.sentMu.Lock()
-					if c.sentClient != nil {
-						c.sentClient.Close()
-						c.sentClient = nil
-					}
-					c.sentConnected = false
-					c.sentMu.Unlock()
-					go c.ensureSentConnectionAndLoop()
-					// Small backoff before next loop iteration
-					time.Sleep(2 * time.Second)
+					reconnectSent(err)
+					return
 				}
 			}
 		}
@@ -1428,6 +1461,63 @@ func (c *Client) triggerReconnect() {
 	select {
 	case c.reconnect <- struct{}{}:
 	default:
+	}
+}
+
+// sendBridgeState wraps BridgeState.Send with a small duplicate throttling window
+// to avoid spamming identical state/error pairs during brief flaps. It only
+// suppresses if both StateEvent and Error match the last sent and the last send
+// was within 60 seconds. Otherwise, it forwards to the framework.
+func (c *Client) sendBridgeState(state status.BridgeState) {
+	if c.login == nil {
+		return
+	}
+	const cooldown = 60 * time.Second
+	now := time.Now()
+	if state.StateEvent == c.lastStateEvent && state.Error == c.lastStateError && now.Sub(c.lastStateTime) < cooldown {
+		c.log.Debug().
+			Str("bridge_state", string(state.StateEvent)).
+			Str("error", string(state.Error)).
+			Dur("since_last", now.Sub(c.lastStateTime)).
+			Msg("Throttling duplicate bridge state")
+		return
+	}
+	c.login.BridgeState.Send(state)
+	c.lastStateEvent = state.StateEvent
+	c.lastStateError = state.Error
+	c.lastStateTime = now
+}
+
+// sentHealthLoop periodically NOOPs the Sent connection and triggers a rebuild on failure.
+func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			c.sentMu.RLock()
+			cli := c.sentClient
+			c.sentMu.RUnlock()
+			if cli == nil {
+				continue
+			}
+			noop := cli.Noop()
+			if err := noop.Wait(); err != nil {
+				if isHardNetErr(err) {
+					c.log.Warn().Err(err).Msg("Sent NOOP failed, rebuilding Sent connection")
+					c.sentMu.Lock()
+					if c.sentClient != nil {
+						c.sentClient.Close()
+						c.sentClient = nil
+					}
+					c.sentConnected = false
+					c.sentMu.Unlock()
+					go c.ensureSentConnectionAndLoop()
+				}
+			}
+		}
 	}
 }
 
