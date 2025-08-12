@@ -302,39 +302,42 @@ func (p *Processor) parseMIMEContent(data []byte) (textContent, htmlContent stri
 		return string(data), ""
 	}
 
+	// Content-Transfer-Encoding may require decoding even for single-part messages
+	cte := msg.Header.Get("Content-Transfer-Encoding")
+
 	// Check Content-Type header
 	contentType := msg.Header.Get("Content-Type")
 	if contentType == "" {
 		// No content type: try boundary heuristic
-		raw, _ := io.ReadAll(msg.Body)
+		raw, _ := io.ReadAll(decodeBody(msg.Body, cte))
 		if boundary := detectBoundary(raw); boundary != "" {
 			return p.parseMultipartContent(bytes.NewReader(raw), boundary)
 		}
-		// Fallback: plain text
+		// Fallback: plain text (decoded)
 		return string(raw), ""
 	}
 
 	// Parse media type
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		// Fallback to plain text
-		body, _ := io.ReadAll(msg.Body)
+		// Fallback to plain text (decoded)
+		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
 		return string(body), ""
 	}
 
 	switch {
 	case strings.HasPrefix(mediaType, "text/plain"):
-		body, _ := io.ReadAll(msg.Body)
+		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
 		return string(body), ""
 	case strings.HasPrefix(mediaType, "text/html"):
-		body, _ := io.ReadAll(msg.Body)
+		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
 		return "", string(body)
 	case strings.HasPrefix(mediaType, "multipart/"):
 		// Handle multipart messages
 		return p.parseMultipartContent(msg.Body, params["boundary"])
 	default:
-		// Unknown content type, try to read as text
-		body, _ := io.ReadAll(msg.Body)
+		// Unknown content type, try to read as text (decoded)
+		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
 		return string(body), ""
 	}
 }
