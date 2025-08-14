@@ -30,9 +30,9 @@ type IMAPDebugWriter struct {
 func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 	data := string(p)
 	
-	// Don't log credentials but log everything else
-	if strings.Contains(strings.ToUpper(data), "LOGIN") {
-		w.logger.Trace().Str("imap_data", "[LOGIN COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
+	// Redact credentials from various authentication commands
+	if w.containsCredentials(data) {
+		w.logger.Trace().Str("imap_data", "[AUTHENTICATION COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
 	} else {
 		if w.sanitized {
 			// Summarize instead of dumping raw protocol contents
@@ -43,6 +43,39 @@ func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 	}
 	
 	return len(p), nil
+}
+
+// containsCredentials checks if the IMAP data contains authentication credentials
+func (w *IMAPDebugWriter) containsCredentials(data string) bool {
+	dataUpper := strings.ToUpper(data)
+	
+	// Check for various authentication commands that contain credentials
+	authCommands := []string{
+		"LOGIN",           // Basic LOGIN command
+		"AUTHENTICATE",    // AUTHENTICATE command (OAuth, PLAIN, etc)
+		"APPEND",          // APPEND with AUTH= parameter can contain credentials
+	}
+	
+	for _, cmd := range authCommands {
+		if strings.Contains(dataUpper, cmd) {
+			// For LOGIN and AUTHENTICATE, if it contains the command, redact it
+			if cmd == "LOGIN" || cmd == "AUTHENTICATE" {
+				return true
+			}
+			// For APPEND, only redact if it contains AUTH= parameter
+			if cmd == "APPEND" && strings.Contains(dataUpper, "AUTH=") {
+				return true
+			}
+		}
+	}
+	
+	// Also check for base64 encoded credentials (common in OAuth/SASL)
+	// Look for suspiciously long base64-like strings that might be tokens
+	if strings.Contains(dataUpper, "SASL") || strings.Contains(dataUpper, "OAUTH") {
+		return true
+	}
+	
+	return false
 }
 
 // Client manages IMAP synchronization for a specific email account.
@@ -170,6 +203,33 @@ var CommonProviders = map[string]EmailProvider{
 	},
 }
 
+// getSecureTLSConfig returns a TLS configuration with security hardening
+func getSecureTLSConfig(serverName string) *tls.Config {
+	return &tls.Config{
+		ServerName: serverName,
+		// Require TLS 1.2 minimum for security
+		MinVersion: tls.VersionTLS12,
+		// Prefer TLS 1.3 if available
+		MaxVersion: tls.VersionTLS13,
+		// Use only secure cipher suites (AEAD ciphers only)
+		CipherSuites: []uint16{
+			// TLS 1.2 secure cipher suites
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+		},
+		// Ensure certificate verification is enabled (explicit for clarity)
+		InsecureSkipVerify: false,
+		// Enable client session cache for performance
+		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+		// Disable insecure renegotiation
+		Renegotiation: tls.RenegotiateNever,
+	}
+}
+
 // NewClient creates a new IMAP client for the given email account
 func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string, backfillSeconds int, backfillMax int, initialIdleTimeoutSeconds int) (*Client, error) {
 	// Auto-detect provider settings
@@ -284,9 +344,7 @@ func (c *Client) connectInternal() error {
 	var err error
 
 	if c.TLS {
-		conn, err = tls.Dial("tcp", addr, &tls.Config{
-			ServerName: c.Host,
-		})
+		conn, err = tls.Dial("tcp", addr, getSecureTLSConfig(c.Host))
 	} else {
 		conn, err = net.Dial("tcp", addr)
 	}
@@ -1357,7 +1415,7 @@ func (c *Client) ensureSentConnectionAndLoop() {
 		var conn net.Conn
 		var err error
 		if c.TLS {
-			conn, err = tls.Dial("tcp", addr, &tls.Config{ServerName: c.Host})
+			conn, err = tls.Dial("tcp", addr, getSecureTLSConfig(c.Host))
 		} else {
 			conn, err = net.Dial("tcp", addr)
 		}

@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/pbkdf2"
 	"maunium.net/go/mautrix/bridgev2/database"
 )
 
@@ -39,7 +41,12 @@ type EmailAccountQuery struct {
 
 // --- Minimal AES-GCM helper and key management (self-contained) ---
 
-const encPrefix = "v1:"
+const encPrefix = "v2:"
+
+const (
+	pbkdf2Iterations = 100000 // PBKDF2 iterations for key derivation
+	saltSize        = 32      // Salt size in bytes
+)
 
 var (
 	keyOnce sync.Once
@@ -49,47 +56,61 @@ var (
 
 func getDBKey() ([]byte, error) {
 	keyOnce.Do(func() {
-		// Priority: env var, then key file, else generate
-		if keyStr := strings.TrimSpace(os.Getenv("EMAILDAWG_DB_KEY")); keyStr != "" {
-			if b, err := parseKeyString(keyStr); err == nil {
-				dbKey = b
-				return
-			} else {
-				keyErr = fmt.Errorf("invalid EMAILDAWG_DB_KEY: %w", err)
-				return
-			}
-		}
-		keyPath := filepath.Join(".", "data", "emaildawg.key")
-		if b, err := os.ReadFile(keyPath); err == nil {
-			k, err := parseKeyString(strings.TrimSpace(string(b)))
-			if err != nil {
-				keyErr = fmt.Errorf("invalid key in %s: %w", keyPath, err)
-				return
-			}
-			dbKey = k
+		// Use PBKDF2 with passphrase for better security
+		passphrase := strings.TrimSpace(os.Getenv("EMAILDAWG_PASSPHRASE"))
+		if passphrase == "" {
+			keyErr = errors.New("EMAILDAWG_PASSPHRASE environment variable is required for secure credential storage")
 			return
 		}
-		// Generate and persist
-		buf := make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, buf); err != nil {
-			keyErr = fmt.Errorf("failed to generate key: %w", err)
+		
+		salt, err := getSalt()
+		if err != nil {
+			keyErr = fmt.Errorf("failed to get salt: %w", err)
 			return
 		}
-		_ = os.MkdirAll(filepath.Join(".", "data"), 0o755)
-		b64 := base64.StdEncoding.EncodeToString(buf)
-		if err := os.WriteFile(keyPath, []byte(b64+"\n"), 0o600); err != nil {
-			keyErr = fmt.Errorf("failed to write key file %s: %w", keyPath, err)
-			return
-		}
-		dbKey = buf
+		
+		// Derive key using PBKDF2
+		dbKey = pbkdf2.Key([]byte(passphrase), salt, pbkdf2Iterations, 32, sha256.New)
 	})
 	if keyErr != nil {
 		return nil, keyErr
 	}
 	if len(dbKey) != 32 {
-		return nil, fmt.Errorf("db key must be 32 bytes, got %d", len(dbKey))
+		return nil, fmt.Errorf("derived key must be 32 bytes, got %d", len(dbKey))
 	}
 	return dbKey, nil
+}
+
+// getSalt returns the salt for PBKDF2, generating one if needed
+func getSalt() ([]byte, error) {
+	saltPath := filepath.Join(".", "data", "emaildawg.salt")
+	
+	// Try to read existing salt
+	if data, err := os.ReadFile(saltPath); err == nil {
+		salt, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+		if err == nil && len(salt) == saltSize {
+			return salt, nil
+		}
+	}
+	
+	// Generate new salt
+	salt := make([]byte, saltSize)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("failed to generate salt: %w", err)
+	}
+	
+	// Create directory with secure permissions
+	if err := os.MkdirAll(filepath.Join(".", "data"), 0o700); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+	
+	// Save salt
+	saltB64 := base64.StdEncoding.EncodeToString(salt)
+	if err := os.WriteFile(saltPath, []byte(saltB64), 0o600); err != nil {
+		return nil, fmt.Errorf("failed to save salt: %w", err)
+	}
+	
+	return salt, nil
 }
 
 func parseKeyString(s string) ([]byte, error) {
@@ -140,9 +161,16 @@ func encryptString(plain string) (string, error) {
 }
 
 func decryptString(stored string) (string, error) {
-	if !strings.HasPrefix(stored, encPrefix) {
-		return "", errors.New("value is not encrypted with expected prefix")
+	// Check for old v1 encrypted data and provide helpful error message
+	if strings.HasPrefix(stored, "v1:") {
+		return "", errors.New("cannot decrypt old v1 encrypted data - please delete your database and reconfigure your email accounts with the new secure system using EMAILDAWG_PASSPHRASE environment variable")
 	}
+	
+	// Only accept v2 encrypted data
+	if !strings.HasPrefix(stored, encPrefix) {
+		return "", errors.New("value is not encrypted with expected v2: prefix")
+	}
+	
 	key, err := getDBKey()
 	if err != nil {
 		return "", err
