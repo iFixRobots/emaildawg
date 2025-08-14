@@ -54,27 +54,28 @@ func NewCircuitBreaker(maxFailures int, timeout time.Duration) (*CircuitBreaker,
 
 // Execute runs the given function through the circuit breaker
 func (cb *CircuitBreaker) Execute(fn func() error) error {
-	if err := cb.checkState(); err != nil {
+	// Check state and handle counter increment atomically
+	shouldDecrement, err := cb.checkStateAndIncrement()
+	if err != nil {
 		return err
 	}
-
-	// Track if we're in half-open to decrement counter later
-	wasHalfOpen := cb.GetState() == StateHalfOpen
+	
+	// Ensure we decrement if we incremented, regardless of state changes
+	defer func() {
+		if shouldDecrement {
+			atomic.AddInt32(&cb.halfOpenRequests, -1)
+		}
+	}()
 	
 	// Execute function
-	err := fn()
-	
-	// Decrement half-open counter if we were in half-open state
-	if wasHalfOpen {
-		atomic.AddInt32(&cb.halfOpenRequests, -1)
-	}
+	err = fn()
 	
 	cb.recordResult(err)
 	return err
 }
 
-// checkState checks if the circuit breaker allows the request
-func (cb *CircuitBreaker) checkState() error {
+// checkStateAndIncrement checks state and increments counter atomically, returns (shouldDecrement, error)
+func (cb *CircuitBreaker) checkStateAndIncrement() (bool, error) {
 	// First, quick read-only check
 	cb.mu.RLock()
 	currentState := cb.state
@@ -97,7 +98,7 @@ func (cb *CircuitBreaker) checkState() error {
 		}
 		
 		if currentState == StateOpen {
-			return ErrCircuitBreakerOpen
+			return false, ErrCircuitBreakerOpen
 		}
 		// Fall through to handle StateHalfOpen case if we transitioned
 		fallthrough
@@ -105,13 +106,13 @@ func (cb *CircuitBreaker) checkState() error {
 		// Limit concurrent requests in half-open state
 		currentRequests := atomic.LoadInt32(&cb.halfOpenRequests)
 		if currentRequests >= int32(cb.maxHalfOpenRequests) {
-			return ErrTooManyRequests
+			return false, ErrTooManyRequests
 		}
 		// Increment counter atomically
 		atomic.AddInt32(&cb.halfOpenRequests, 1)
-		return nil
+		return true, nil // We incremented, so caller should decrement
 	}
-	return nil
+	return false, nil
 }
 
 // recordResult records the result of the executed function
@@ -161,4 +162,6 @@ func (cb *CircuitBreaker) Reset() {
 	defer cb.mu.Unlock()
 	cb.failures = 0
 	cb.state = StateClosed
+	// Reset half-open request counter for consistent state
+	atomic.StoreInt32(&cb.halfOpenRequests, 0)
 }

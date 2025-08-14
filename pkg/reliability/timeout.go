@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// Logger interface for timeout operations
+type Logger interface {
+	Warn(msg string, args ...interface{})
+	Error(msg string, args ...interface{})
+}
+
 // TimeoutConfig holds timeout settings for different operations
 type TimeoutConfig struct {
 	Connect    time.Duration
@@ -40,17 +46,14 @@ func IMAPTimeouts() TimeoutConfig {
 	}
 }
 
-// WithTimeout executes a function with a timeout
-func WithTimeout(timeout time.Duration, fn func(ctx context.Context) error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	
+// runWithCtx executes a function with context and handles goroutine management
+func runWithCtx(ctx context.Context, logger Logger, fn func(context.Context) error) error {
 	done := make(chan error, 1)
 	go func() {
 		defer func() {
 			// Recover from any panic in fn to prevent goroutine leak
 			if r := recover(); r != nil {
-				done <- fmt.Errorf("panic in timeout function: %v", r)
+				done <- fmt.Errorf("panic in context function: %v", r)
 			}
 		}()
 		done <- fn(ctx)
@@ -60,50 +63,30 @@ func WithTimeout(timeout time.Duration, fn func(ctx context.Context) error) erro
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		// Wait for goroutine to finish with a grace period to prevent leak
-		go func() {
-			select {
-			case <-done:
-				// Function completed after timeout, drain the channel
-			case <-time.After(5 * time.Second):
-				// Log warning about potential goroutine leak after grace period
-				// Note: In production, you'd want to use a proper logger here
+		// Non-blocking drain of done channel
+		select {
+		case <-done:
+			// Function completed after context cancellation, no leak
+		default:
+			// Function hasn't finished - potential goroutine leak
+			if logger != nil {
+				logger.Warn("potential goroutine leak: function did not complete before context cancellation")
 			}
-		}()
+		}
 		return ctx.Err()
 	}
 }
 
-// WithDeadline executes a function with a deadline
-func WithDeadline(deadline time.Time, fn func(ctx context.Context) error) error {
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+// WithTimeout executes a function with a timeout
+func WithTimeout(parentCtx context.Context, timeout time.Duration, logger Logger, fn func(ctx context.Context) error) error {
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
-	
-	done := make(chan error, 1)
-	go func() {
-		defer func() {
-			// Recover from any panic in fn to prevent goroutine leak
-			if r := recover(); r != nil {
-				done <- fmt.Errorf("panic in deadline function: %v", r)
-			}
-		}()
-		done <- fn(ctx)
-	}()
-	
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		// Wait for goroutine to finish with a grace period to prevent leak
-		go func() {
-			select {
-			case <-done:
-				// Function completed after deadline, drain the channel
-			case <-time.After(5 * time.Second):
-				// Log warning about potential goroutine leak after grace period
-				// Note: In production, you'd want to use a proper logger here
-			}
-		}()
-		return ctx.Err()
-	}
+	return runWithCtx(ctx, logger, fn)
+}
+
+// WithDeadline executes a function with a deadline  
+func WithDeadline(parentCtx context.Context, deadline time.Time, logger Logger, fn func(ctx context.Context) error) error {
+	ctx, cancel := context.WithDeadline(parentCtx, deadline)
+	defer cancel()
+	return runWithCtx(ctx, logger, fn)
 }

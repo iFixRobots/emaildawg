@@ -382,23 +382,57 @@ func (c *Client) connectInternal() error {
 		DebugWriter: debugWriter, // Enable full IMAP protocol debugging
 	})
 
-	// Authenticate with timeout
+	// Authenticate with timeout and proper cleanup
+	loginCtx, loginCancel := context.WithTimeout(c.ctx, c.timeoutConfig.Command)
+	defer loginCancel()
+	
 	loginErr := make(chan error, 1)
 	go func() {
-		loginErr <- c.client.Login(c.Username, c.Password).Wait()
+		defer func() {
+			if r := recover(); r != nil {
+				loginErr <- fmt.Errorf("panic in login command: %v", r)
+			}
+		}()
+		
+		// Execute login with context awareness
+		cmd := c.client.Login(c.Username, c.Password)
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		
+		select {
+		case err := <-done:
+			loginErr <- err
+		case <-loginCtx.Done():
+			// Context cancelled, but we still need to wait for the command to complete
+			// to avoid resource leaks
+			go func() {
+				<-done // Drain the channel to prevent goroutine leak
+			}()
+			loginErr <- loginCtx.Err()
+		}
 	}()
 	
 	select {
 	case err := <-loginErr:
 		if err != nil {
+			// Handle timeout specifically 
+			if err == context.DeadlineExceeded {
+				c.log.Error().Msg("IMAP authentication timed out")
+				conn.Close()
+				return fmt.Errorf("IMAP login timed out after %v", c.timeoutConfig.Command)
+			}
+			
 			c.log.Error().Err(err).Str("username", c.Username).Msg("IMAP authentication failed")
 			conn.Close()
 			return fmt.Errorf("IMAP login failed: %w", err)
 		}
-	case <-time.After(c.timeoutConfig.Command):
-		c.log.Error().Msg("IMAP authentication timed out")
+	case <-loginCtx.Done():
+		// Secondary timeout check in case the goroutine doesn't respond
+		c.log.Error().Msg("IMAP authentication context cancelled")
 		conn.Close()
-		return fmt.Errorf("IMAP login timed out after %v", c.timeoutConfig.Command)
+		return fmt.Errorf("IMAP login context cancelled: %v", loginCtx.Err())
 	}
 
 	c.connected = true
@@ -1176,15 +1210,10 @@ func (c *Client) reconnectClient() error {
 	c.isConnecting = true
 	defer func() { c.isConnecting = false }()
 	
-	// Check circuit breaker first
-	if c.circuitBreaker != nil && c.circuitBreaker.GetState() == reliability.StateOpen {
-		return fmt.Errorf("circuit breaker open: too many failures (%d)", c.circuitBreaker.GetFailures())
-	}
-	
 	// Disconnect first
 	c.Disconnect()
 	
-	// Use retry with exponential backoff
+	// Use retry with exponential backoff - let circuit breaker handle allow/reject logic
 	return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
 		c.log.Info().Msg("Attempting IMAP reconnection")
 		if c.circuitBreaker != nil {
@@ -1325,16 +1354,47 @@ func (c *Client) TestConnection() error {
 		return fmt.Errorf("IMAP client not connected")
 	}
 	
-	// Send NOOP command to test connection health
+	// Send NOOP command to test connection health with context cancellation
 	// This will fail if the connection is stale or if there are server-side issues
+	testCtx, testCancel := context.WithTimeout(c.ctx, c.timeoutConfig.Command)
+	defer testCancel()
+	
 	noopErr := make(chan error, 1)
 	go func() {
-		noopErr <- client.Noop().Wait()
+		defer func() {
+			if r := recover(); r != nil {
+				noopErr <- fmt.Errorf("panic in NOOP command: %v", r)
+			}
+		}()
+		
+		// Execute NOOP with context awareness
+		cmd := client.Noop()
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		
+		select {
+		case err := <-done:
+			noopErr <- err
+		case <-testCtx.Done():
+			// Context cancelled, but we still need to wait for the command to complete
+			// to avoid resource leaks
+			go func() {
+				<-done // Drain the channel to prevent goroutine leak
+			}()
+			noopErr <- testCtx.Err()
+		}
 	}()
 	
 	select {
 	case err := <-noopErr:
 		if err != nil {
+			// Handle timeout specifically
+			if err == context.DeadlineExceeded {
+				return fmt.Errorf("NOOP command timed out after %v", c.timeoutConfig.Command)
+			}
+			
 			// If this looks like a hard network error, force-clear state so callers can reconnect
 			if isHardNetErr(err) {
 				c.mu.Lock()
@@ -1348,8 +1408,9 @@ func (c *Client) TestConnection() error {
 			}
 			return fmt.Errorf("NOOP command failed: %w", err)
 		}
-	case <-time.After(c.timeoutConfig.Command):
-		return fmt.Errorf("NOOP command timed out after %v", c.timeoutConfig.Command)
+	case <-testCtx.Done():
+		// Secondary timeout check in case the goroutine doesn't respond
+		return fmt.Errorf("NOOP test context cancelled: %v", testCtx.Err())
 	}
 	
 	c.log.Debug().Msg("Connection test successful (NOOP command completed)")

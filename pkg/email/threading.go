@@ -295,13 +295,8 @@ func (tm *ThreadManager) addToExistingThread(thread *EmailThread, email *ParsedE
 	// Update references chain
 	if email.MessageID != "" {
 		// Add this message to the references chain
-		oldRefsLen := len(thread.References)
 		thread.References = appendUnique(thread.References, email.MessageID)
-		
-		// If references were updated, update the index (only if we have the lock)
-		if len(thread.References) > oldRefsLen {
-			tm.messageIDIndex[email.MessageID] = thread
-		}
+		// Note: Index update will be handled by CacheForReceiver path under write lock
 	}
 
 	return thread
