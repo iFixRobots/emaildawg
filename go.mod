@@ -9,6 +9,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/rs/zerolog v1.34.0
 	go.mau.fi/util v0.8.9-0.20250723171559-474867266038
+	golang.org/x/crypto v0.40.0
 	maunium.net/go/mautrix v0.24.2
 )
 
@@ -30,7 +31,6 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/yuin/goldmark v1.7.12 // indirect
 	go.mau.fi/zeroconfig v0.1.3 // indirect
-	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/exp v0.0.0-20250718183923-645b1fa84792 // indirect
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
