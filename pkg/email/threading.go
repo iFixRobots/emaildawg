@@ -156,15 +156,7 @@ func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *E
 		}
 	}
 
-	// Step 3: Check for subject-based threading (less reliable)
-	normalizedSubject := normalizeSubject(email.Subject)
-	for _, thread := range tm.knownThreads {
-		if normalizeSubject(thread.Subject) == normalizedSubject {
-			return tm.addToExistingThread(thread, email)
-		}
-	}
-
-	// Step 4: This is a new thread
+	// Step 3: This is a new thread (subject-based threading removed to prevent false positives)
 	return tm.createNewThread(email)
 }
 
