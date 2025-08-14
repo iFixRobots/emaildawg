@@ -366,8 +366,10 @@ func (c *Client) Disconnect() error {
 }
 
 // StartIDLE begins IMAP IDLE monitoring for real-time email delivery
-func (c *Client) StartIDLE() error {
+func (c *Client) StartIDLE() (err error) {
 	c.mu.Lock()
+	
+	// Check if already idling to prevent concurrent IDLE attempts
 	if c.idling {
 		c.mu.Unlock()
 		return fmt.Errorf("IDLE already running")
@@ -376,38 +378,41 @@ func (c *Client) StartIDLE() error {
 		c.mu.Unlock()
 		return fmt.Errorf("not connected to IMAP server")
 	}
+	
 	// Create a fresh stop channel for this IDLE session
 	c.stopIdle = make(chan struct{})
 	c.idling = true
+	// Keep mutex locked until critical setup is complete
+	defer func() {
+		if err != nil {
+			// Reset state on error
+			c.mu.Lock()
+			c.idling = false
+			c.mu.Unlock()
+		}
+	}()
+	
+	// Get a local reference to the client while protected by mutex
+	client := c.client
 	c.mu.Unlock()
 
 	c.log.Info().Msg("Starting IMAP IDLE monitoring")
 
 	// Select INBOX - this will reset any stale connection state
-	if _, err := c.client.Select("INBOX", nil).Wait(); err != nil {
-		c.mu.Lock()
-		c.idling = false
-		c.mu.Unlock()
+	if _, err := client.Select("INBOX", nil).Wait(); err != nil {
 		return fmt.Errorf("failed to select INBOX: %w", err)
 	}
 
 	// Establish immediate baseline and optional backfill BEFORE starting IDLE (INBOX)
-	if err := c.primeBaselineAndBackfillFor(c.client, "INBOX", false); err != nil {
-		c.mu.Lock()
-		c.idling = false
-		c.mu.Unlock()
+	if err := c.primeBaselineAndBackfillFor(client, "INBOX", false); err != nil {
 		return fmt.Errorf("failed to prime baseline/backfill: %w", err)
 	}
 
 	// Test IDLE capability before starting the loop
 	// This will fail immediately if server thinks IDLE is already running
 	c.log.Trace().Msg("Probing IDLE capability with a short-lived test call")
-	testIdleCmd, err := c.client.Idle()
+	testIdleCmd, err := client.Idle()
 	if err != nil {
-		c.mu.Lock()
-		c.idling = false
-		c.mu.Unlock()
-		
 		// If IDLE is "already running", force a reconnection to reset server state
 		if strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "IDLE already") {
 			c.log.Warn().Err(err).Msg("Server reports IDLE already running - forcing connection reset")
