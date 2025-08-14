@@ -162,6 +162,9 @@ func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *E
 
 // findThreadByMessageID finds an existing thread that contains a specific Message-ID
 func (tm *ThreadManager) findThreadByMessageID(messageID string) *EmailThread {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	
 	for _, thread := range tm.knownThreads {
 		// Check if this message ID is the thread root
 		if thread.ThreadID == messageID {
@@ -298,7 +301,9 @@ func (tm *ThreadManager) createNewThread(email *ParsedEmail) *EmailThread {
 
 	// Add to known threads (no receiver here; caller will cache after DetermineThread using receiver)
 	// For now, store under empty receiver to keep legacy behavior.
+	tm.mu.Lock()
 	tm.knownThreads[threadID] = thread
+	tm.mu.Unlock()
 
 	return thread
 }

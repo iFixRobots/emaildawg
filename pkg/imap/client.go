@@ -247,6 +247,12 @@ func (c *Client) Connect() error {
 	c.isConnecting = true
 	defer func() { c.isConnecting = false }()
 
+	return c.connectInternal()
+}
+
+// connectInternal performs the actual connection logic without connection guards
+// Must be called only when connection guards are already held
+func (c *Client) connectInternal() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -320,7 +326,12 @@ func (c *Client) Disconnect() error {
 
 	// Stop IDLE if running
 	if c.idling {
-		close(c.stopIdle)
+		select {
+		case <-c.stopIdle:
+			// Already closed
+		default:
+			close(c.stopIdle)
+		}
 		c.idling = false
 	}
 
@@ -1055,6 +1066,16 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 
 // reconnectClient attempts to reconnect to the IMAP server with circuit breaker
 func (c *Client) reconnectClient() error {
+	// Acquire connection guard to prevent concurrent reconnect attempts
+	c.connectingMu.Lock()
+	defer c.connectingMu.Unlock()
+	
+	if c.isConnecting {
+		return fmt.Errorf("connection operation already in progress")
+	}
+	c.isConnecting = true
+	defer func() { c.isConnecting = false }()
+	
 	c.mu.Lock()
 	// Check circuit breaker
 	if c.failureCount >= c.maxFailures {
@@ -1066,13 +1087,14 @@ func (c *Client) reconnectClient() error {
 		c.log.Info().Msg("Circuit breaker reset: attempting reconnection")
 		c.failureCount = 0
 	}
+	failureCount := c.failureCount
 	c.mu.Unlock()
 	
 	// Disconnect first
 	c.Disconnect()
 	
 	// Calculate exponential backoff (min 5s, max 5min) with jitter (+/-20%)
-	base := time.Duration(c.failureCount+1) * 5 * time.Second
+	base := time.Duration(failureCount+1) * 5 * time.Second
 	if base > 5*time.Minute {
 		base = 5 * time.Minute
 	}
@@ -1082,11 +1104,11 @@ func (c *Client) reconnectClient() error {
 	if backoffDuration < 0 {
 		backoffDuration = base // avoid negative
 	}
-	c.log.Info().Dur("backoff", backoffDuration).Int("failure_count", c.failureCount).Msg("Waiting before reconnection attempt")
+	c.log.Info().Dur("backoff", backoffDuration).Int("failure_count", failureCount).Msg("Waiting before reconnection attempt")
 	time.Sleep(backoffDuration)
 	
-	// Reconnect
-	if err := c.Connect(); err != nil {
+	// Reconnect (bypass Connect's own guard since we already hold it)
+	if err := c.connectInternal(); err != nil {
 		c.mu.Lock()
 		c.failureCount++
 		c.lastFailure = time.Now()
@@ -1161,6 +1183,13 @@ func (c *Client) IsIDLERunning() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.idling
+}
+
+// IsReconnecting returns whether a connection operation is currently in progress
+func (c *Client) IsReconnecting() bool {
+	c.connectingMu.Lock()
+	defer c.connectingMu.Unlock()
+	return c.isConnecting
 }
 
 // CheckNewMessages is a public method to manually check for new messages
@@ -1300,8 +1329,10 @@ func (c *Client) safeStartIDLE() error {
 	}
 }
 
-// testConnectionNoLock assumes external synchronization if needed and only checks current handle liveness.
+// testConnectionNoLock assumes the caller holds c.mu and only checks current handle liveness.
+// This function MUST be called with c.mu held to avoid race conditions.
 func (c *Client) testConnectionNoLock() error {
+	// Note: c.mu must be held by caller - no additional locking here
 	if !c.connected || c.client == nil {
 		return fmt.Errorf("IMAP client not connected")
 	}
@@ -1502,26 +1533,37 @@ func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 		case <-stopCh:
 			return
 		case <-ticker.C:
-			c.sentMu.RLock()
-			cli := c.sentClient
-			c.sentMu.RUnlock()
-			if cli == nil {
-				continue
-			}
-			noop := cli.Noop()
-			if err := noop.Wait(); err != nil {
-				if isHardNetErr(err) {
-					c.log.Warn().Err(err).Msg("Sent NOOP failed, rebuilding Sent connection")
-					c.sentMu.Lock()
-					if c.sentClient != nil {
-						c.sentClient.Close()
-						c.sentClient = nil
-					}
-					c.sentConnected = false
-					c.sentMu.Unlock()
-					go c.ensureSentConnectionAndLoop()
+			// Perform NOOP test with connection protection
+			func() {
+				c.sentMu.RLock()
+				defer c.sentMu.RUnlock()
+				
+				if c.sentClient == nil {
+					return
 				}
-			}
+				
+				// Keep the lock while performing the operation to prevent races
+				noop := c.sentClient.Noop()
+				if err := noop.Wait(); err != nil {
+					if isHardNetErr(err) {
+						c.log.Warn().Err(err).Msg("Sent NOOP failed, triggering connection rebuild")
+						// We need to upgrade to write lock for cleanup, but we can't do it safely
+						// while holding read lock. Signal rebuild in a separate goroutine.
+						go func() {
+							c.sentMu.Lock()
+							defer c.sentMu.Unlock()
+							
+							// Double-check the client is still the same (avoid race)
+							if c.sentClient != nil {
+								c.sentClient.Close()
+								c.sentClient = nil
+								c.sentConnected = false
+								go c.ensureSentConnectionAndLoop()
+							}
+						}()
+					}
+				}
+			}()
 		}
 	}
 }
@@ -1570,6 +1612,16 @@ func isHardNetErr(err error) bool {
 
 // resetConnection forces a complete disconnection and reconnection to clear server-side state
 func (c *Client) resetConnection() error {
+	// Acquire connection guard to prevent concurrent reset/connect attempts
+	c.connectingMu.Lock()
+	defer c.connectingMu.Unlock()
+	
+	if c.isConnecting {
+		return fmt.Errorf("connection operation already in progress")
+	}
+	c.isConnecting = true
+	defer func() { c.isConnecting = false }()
+	
 	c.log.Info().Msg("Resetting IMAP connection to clear server-side IDLE state")
 	
 	// Force disconnect without proper logout (since server state is already confused)
@@ -1585,8 +1637,8 @@ func (c *Client) resetConnection() error {
 	// Wait a moment for server-side cleanup
 	time.Sleep(2 * time.Second)
 	
-	// Establish fresh connection
-	if err := c.Connect(); err != nil {
+	// Establish fresh connection (bypass Connect's own guard since we already hold it)
+	if err := c.connectInternal(); err != nil {
 		return fmt.Errorf("failed to reconnect after reset: %w", err)
 	}
 	

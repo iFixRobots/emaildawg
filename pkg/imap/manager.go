@@ -2,6 +2,7 @@ package imap
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -254,6 +255,12 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 		for range Ticker.C {
 			// Snapshot connected state
 			if !client.IsConnected() {
+				// Check if the client is already reconnecting to avoid interference
+				if client.IsReconnecting() {
+					logger.Debug().Msg("Client already reconnecting, watchdog waiting")
+					continue
+				}
+				
 				// Attempt to bring the client back online even if it's currently disconnected
 				logger.Warn().Msg("Client disconnected, attempting reconnect from watchdog")
 				// Demote bridge state for this login while attempting recovery (send only on transition)
@@ -261,14 +268,24 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 					m.sendStateIfChanged(userMXID, email, client.login, "TRANSIENT_DISCONNECT", map[string]any{"component": "imap", "reason": "watchdog_disconnected"}, 300)
 				}
 				if recErr := client.Reconnect(); recErr != nil {
+					// Check if error indicates concurrent operation in progress
+					if strings.Contains(recErr.Error(), "already in progress") {
+						logger.Debug().Msg("Reconnect already in progress, watchdog backing off")
+						continue
+					}
 					logger.Error().Err(recErr).Msg("Reconnect failed from watchdog while disconnected")
 					continue
 				}
-				if err := client.StartIDLE(); err != nil {
-					logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
-				} else if client.login != nil {
-					// Promote back to connected when IDLE starts (send only on transition)
-					m.sendStateIfChanged(userMXID, email, client.login, "CONNECTED", nil, 0)
+				// Only try to start IDLE if not already running
+				if !client.IsIDLERunning() {
+					if err := client.StartIDLE(); err != nil {
+						if !strings.Contains(err.Error(), "already running") {
+							logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
+						}
+					} else if client.login != nil {
+						// Promote back to connected when IDLE starts (send only on transition)
+						m.sendStateIfChanged(userMXID, email, client.login, "CONNECTED", nil, 0)
+					}
 				}
 				continue
 			}
@@ -279,15 +296,24 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 					m.sendStateIfChanged(userMXID, email, client.login, "TRANSIENT_DISCONNECT", map[string]any{"component": "imap", "reason": "watchdog_probe_failed"}, 120)
 				}
 				if recErr := client.Reconnect(); recErr != nil {
+					// Check if error indicates concurrent operation in progress
+					if strings.Contains(recErr.Error(), "already in progress") {
+						logger.Debug().Msg("Reconnect already in progress, watchdog backing off")
+						continue
+					}
 					logger.Error().Err(recErr).Msg("Reconnect failed from watchdog")
 					continue
 				}
-				// Restart IDLE after reconnect
-				if err := client.StartIDLE(); err != nil {
-					logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
-				} else if client.login != nil {
-					// Promote to connected after successful IDLE start
-					m.sendStateIfChanged(userMXID, email, client.login, "CONNECTED", nil, 0)
+				// Only restart IDLE if not already running
+				if !client.IsIDLERunning() {
+					if err := client.StartIDLE(); err != nil {
+						if !strings.Contains(err.Error(), "already running") {
+							logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
+						}
+					} else if client.login != nil {
+						// Promote to connected after successful IDLE start
+						m.sendStateIfChanged(userMXID, email, client.login, "CONNECTED", nil, 0)
+					}
 				}
 			}
 		}
