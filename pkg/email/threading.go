@@ -34,6 +34,9 @@ type EmailThread struct {
 	// Participant change tracking for Matrix room updates
 	AddedParticipants   []string // Participants added in the latest email
 	RemovedParticipants []string // Participants removed in the latest email
+	
+	// Cache management
+	LastAccessed time.Time // For TTL cleanup
 }
 
 // ClearParticipantChanges clears the participant change tracking after processing
@@ -51,11 +54,17 @@ type ThreadMetadataResolver interface {
 	ResolveThreadID(receiver, messageID string) (string, bool)
 }
 
+const (
+	maxCachedThreads = 10000      // Maximum number of threads to cache
+	threadCacheTTL  = 24 * time.Hour // TTL for cached threads
+)
+
 type ThreadManager struct {
-	// Cache of known threads with size limit to prevent memory leaks
+	// Cache of known threads with size and TTL limits to prevent memory leaks
 	knownThreads map[string]*EmailThread // key: receiver|threadID
 	mu           sync.RWMutex
 	resolver     ThreadMetadataResolver // optional external resolver
+	lastCleanup  time.Time               // Last time we ran cache cleanup
 }
 
 // NewThreadManager creates a new email thread manager
@@ -63,19 +72,29 @@ func NewThreadManager(resolver ThreadMetadataResolver) *ThreadManager {
 	return &ThreadManager{
 		knownThreads: make(map[string]*EmailThread),
 		resolver:     resolver,
+		lastCleanup:  time.Now(),
 	}
 }
 
 // GetThreadByID returns a thread by its ThreadID if known
 func (tm *ThreadManager) GetThreadByID(receiver, threadID string) *EmailThread {
 	key := receiver + "|" + threadID
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	
+	// Clean up expired threads periodically
+	tm.cleanupExpiredThreadsIfNeeded()
+	
 	if th, ok := tm.knownThreads[key]; ok {
+		th.LastAccessed = time.Now()
 		return th
 	}
 	// Fallback to legacy key without receiver for backward compatibility
-	return tm.knownThreads[threadID]
+	if th, ok := tm.knownThreads[threadID]; ok {
+		th.LastAccessed = time.Now()
+		return th
+	}
+	return nil
 }
 
 func (tm *ThreadManager) getCachedThread(receiver, threadID string) *EmailThread {
@@ -89,7 +108,14 @@ func (tm *ThreadManager) cacheThread(receiver string, thread *EmailThread) {
 	key := receiver + "|" + thread.ThreadID
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	
+	thread.LastAccessed = time.Now()
 	tm.knownThreads[key] = thread
+	
+	// Enforce cache size limit
+	if len(tm.knownThreads) > maxCachedThreads {
+		tm.evictOldestThreads(maxCachedThreads / 4) // Remove 25% when limit exceeded
+	}
 }
 
 // CacheForReceiver exposes caching to callers (e.g., processor) to store a thread under a receiver scope.
@@ -297,12 +323,18 @@ func (tm *ThreadManager) createNewThread(email *ParsedEmail) *EmailThread {
 		MessageID:    email.MessageID,
 		InReplyTo:    email.InReplyTo,
 		References:   email.References,
+		LastAccessed: time.Now(),
 	}
 
 	// Add to known threads (no receiver here; caller will cache after DetermineThread using receiver)
 	// For now, store under empty receiver to keep legacy behavior.
 	tm.mu.Lock()
 	tm.knownThreads[threadID] = thread
+	
+	// Enforce cache size limit
+	if len(tm.knownThreads) > maxCachedThreads {
+		tm.evictOldestThreads(maxCachedThreads / 4) // Remove 25% when limit exceeded
+	}
 	tm.mu.Unlock()
 
 	return thread
@@ -417,4 +449,66 @@ func appendUnique(slice []string, item string) []string {
 		}
 	}
 	return append(slice, item)
+}
+
+// cleanupExpiredThreadsIfNeeded runs cache cleanup periodically to prevent memory leaks
+func (tm *ThreadManager) cleanupExpiredThreadsIfNeeded() {
+	// Only run cleanup every hour to avoid excessive overhead
+	if time.Since(tm.lastCleanup) < time.Hour {
+		return
+	}
+	
+	tm.lastCleanup = time.Now()
+	expiredKeys := make([]string, 0)
+	cutoff := time.Now().Add(-threadCacheTTL)
+	
+	for key, thread := range tm.knownThreads {
+		if thread.LastAccessed.Before(cutoff) {
+			expiredKeys = append(expiredKeys, key)
+		}
+	}
+	
+	for _, key := range expiredKeys {
+		delete(tm.knownThreads, key)
+	}
+}
+
+// evictOldestThreads removes the oldest threads to enforce cache size limits
+func (tm *ThreadManager) evictOldestThreads(countToRemove int) {
+	if len(tm.knownThreads) <= countToRemove {
+		return
+	}
+	
+	// Create slice of threads with their keys, sorted by LastAccessed
+	type threadEntry struct {
+		key          string
+		lastAccessed time.Time
+	}
+	
+	threads := make([]threadEntry, 0, len(tm.knownThreads))
+	for key, thread := range tm.knownThreads {
+		threads = append(threads, threadEntry{
+			key:          key,
+			lastAccessed: thread.LastAccessed,
+		})
+	}
+	
+	// Sort by LastAccessed (oldest first)
+	for i := 0; i < len(threads)-1; i++ {
+		for j := i + 1; j < len(threads); j++ {
+			if threads[i].lastAccessed.After(threads[j].lastAccessed) {
+				threads[i], threads[j] = threads[j], threads[i]
+			}
+		}
+	}
+	
+	// Remove the oldest entries
+	removedCount := 0
+	for _, entry := range threads {
+		if removedCount >= countToRemove {
+			break
+		}
+		delete(tm.knownThreads, entry.key)
+		removedCount++
+	}
 }

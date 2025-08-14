@@ -130,11 +130,16 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 
 	// Register client with IMAP manager for status reporting
 	go func() {
-		// Wait a moment for connection to establish
-		time.Sleep(2 * time.Second)
-		if emailClient.IsConnected() {
-			// Register the connected client with the manager for status reporting
-			ec.IMAPManager.RegisterClient(login.UserMXID.String(), emailClient.Email, emailClient.IMAPClient)
+		// Wait a moment for connection to establish, respecting context cancellation
+		select {
+		case <-time.After(2 * time.Second):
+			if emailClient.IsConnected() {
+				// Register the connected client with the manager for status reporting
+				ec.IMAPManager.RegisterClient(login.UserMXID.String(), emailClient.Email, emailClient.IMAPClient)
+			}
+		case <-ctx.Done():
+			// Context cancelled, exit goroutine
+			return
 		}
 	}()
 

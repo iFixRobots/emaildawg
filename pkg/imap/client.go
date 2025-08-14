@@ -397,21 +397,29 @@ func (c *Client) Disconnect() error {
 	if c.client != nil {
 		// Attempt graceful logout with timeout; force-close on timeout
 		done := make(chan error, 1)
+		logoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		
 		go func() {
+			defer cancel() // Ensure context is cancelled when goroutine completes
 			if err := c.client.Logout().Wait(); err != nil {
 				done <- err
 				return
 			}
 			done <- nil
 		}()
+		
 		select {
 		case err := <-done:
 			if err != nil {
 				c.log.Warn().Err(err).Msg("Error during IMAP logout")
 			}
-		case <-time.After(2 * time.Second):
+		case <-logoutCtx.Done():
 			c.log.Warn().Msg("IMAP logout timed out, force closing connection")
+			// The goroutine will exit when it tries to send to done channel
 		}
+		
+		// Always force close to ensure connection is cleaned up
 		c.client.Close()
 		c.client = nil
 	}
