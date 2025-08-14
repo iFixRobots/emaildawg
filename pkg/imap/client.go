@@ -18,6 +18,7 @@ import (
 
 	"github.com/iFixRobots/emaildawg/pkg/email"
 	logging "github.com/iFixRobots/emaildawg/pkg/logging"
+	"github.com/iFixRobots/emaildawg/pkg/reliability"
 )
 
 // IMAPDebugWriter captures all IMAP protocol traffic for debugging
@@ -137,10 +138,9 @@ type Client struct {
 	inFlightSent  map[imap.UID]struct{}
 	
 	// Circuit breaker for connection failures
-	failureCount int
-	lastFailure  time.Time
-	maxFailures  int
-	backoffTime  time.Duration
+	circuitBreaker *reliability.CircuitBreaker
+	retryConfig    reliability.RetryConfig
+	timeoutConfig  reliability.TimeoutConfig
 
 	// Bridge state throttling
 	lastStateEvent status.BridgeStateEvent
@@ -275,9 +275,10 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		secret:       secret,
 		stopIdle:     make(chan struct{}),
 		reconnect:    make(chan struct{}, 1),
-		// Circuit breaker settings
-		maxFailures:  5,
-		backoffTime:  time.Minute * 2,
+		// Reliability components
+		circuitBreaker: reliability.NewCircuitBreaker(5, 2*time.Minute),
+		retryConfig:    reliability.NetworkRetryConfig(),
+		timeoutConfig:  reliability.IMAPTimeouts(),
 		// Context management
 		ctx:          ctx,
 		cancel:       cancel,
@@ -307,7 +308,10 @@ func (c *Client) Connect() error {
 	c.isConnecting = true
 	defer func() { c.isConnecting = false }()
 
-	return c.connectInternal()
+	// Use circuit breaker to protect against repeated connection failures
+	return c.circuitBreaker.Execute(func() error {
+		return c.connectInternal()
+	})
 }
 
 // connectInternal performs the actual connection logic without connection guards
@@ -338,15 +342,21 @@ func (c *Client) connectInternal() error {
 	
 	c.log.Info().Str("host", c.Host).Int("port", c.Port).Bool("tls", c.TLS).Msg("Connecting to IMAP server")
 
-	// Create network connection
+	// Create network connection with timeout
 	addr := net.JoinHostPort(c.Host, fmt.Sprintf("%d", c.Port))
 	var conn net.Conn
 	var err error
 
+	// Create dialer with connect timeout
+	dialer := &net.Dialer{
+		Timeout: c.timeoutConfig.Connect,
+	}
+
 	if c.TLS {
-		conn, err = tls.Dial("tcp", addr, getSecureTLSConfig(c.Host))
+		tlsConfig := getSecureTLSConfig(c.Host)
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
 	} else {
-		conn, err = net.Dial("tcp", addr)
+		conn, err = dialer.Dial("tcp", addr)
 	}
 
 	if err != nil {
@@ -360,11 +370,23 @@ func (c *Client) connectInternal() error {
 		DebugWriter: debugWriter, // Enable full IMAP protocol debugging
 	})
 
-	// Authenticate
-	if err := c.client.Login(c.Username, c.Password).Wait(); err != nil {
-		c.log.Error().Err(err).Str("username", c.Username).Msg("IMAP authentication failed")
+	// Authenticate with timeout
+	loginErr := make(chan error, 1)
+	go func() {
+		loginErr <- c.client.Login(c.Username, c.Password).Wait()
+	}()
+	
+	select {
+	case err := <-loginErr:
+		if err != nil {
+			c.log.Error().Err(err).Str("username", c.Username).Msg("IMAP authentication failed")
+			conn.Close()
+			return fmt.Errorf("IMAP login failed: %w", err)
+		}
+	case <-time.After(c.timeoutConfig.Command):
+		c.log.Error().Msg("IMAP authentication timed out")
 		conn.Close()
-		return fmt.Errorf("IMAP login failed: %w", err)
+		return fmt.Errorf("IMAP login timed out after %v", c.timeoutConfig.Command)
 	}
 
 	c.connected = true
@@ -1142,63 +1164,21 @@ func (c *Client) reconnectClient() error {
 	c.isConnecting = true
 	defer func() { c.isConnecting = false }()
 	
-	c.mu.Lock()
-	// Check circuit breaker
-	if c.failureCount >= c.maxFailures {
-		if time.Since(c.lastFailure) < c.backoffTime {
-			c.mu.Unlock()
-			return fmt.Errorf("circuit breaker open: too many failures (%d), waiting %v", c.failureCount, c.backoffTime-time.Since(c.lastFailure))
-		}
-		// Reset circuit breaker after backoff period
-		c.log.Info().Msg("Circuit breaker reset: attempting reconnection")
-		c.failureCount = 0
+	// Check circuit breaker first
+	if c.circuitBreaker.GetState() == reliability.StateOpen {
+		return fmt.Errorf("circuit breaker open: too many failures (%d)", c.circuitBreaker.GetFailures())
 	}
-	failureCount := c.failureCount
-	c.mu.Unlock()
 	
 	// Disconnect first
 	c.Disconnect()
 	
-	// Calculate exponential backoff (min 5s, max 5min) with jitter (+/-20%)
-	base := time.Duration(failureCount+1) * 5 * time.Second
-	if base > 5*time.Minute {
-		base = 5 * time.Minute
-	}
-	jitterFraction := 0.2
-	jitter := time.Duration(float64(base) * (rand.Float64()*2*jitterFraction - jitterFraction))
-	backoffDuration := base + jitter
-	if backoffDuration < 0 {
-		backoffDuration = base // avoid negative
-	}
-	c.log.Info().Dur("backoff", backoffDuration).Int("failure_count", failureCount).Msg("Waiting before reconnection attempt")
-	time.Sleep(backoffDuration)
-	
-	// Reconnect (bypass Connect's own guard since we already hold it)
-	if err := c.connectInternal(); err != nil {
-		c.mu.Lock()
-		c.failureCount++
-		c.lastFailure = time.Now()
-		c.mu.Unlock()
-		c.log.Error().Err(err).Int("failure_count", c.failureCount).Msg("Reconnection failed")
-		return err
-	}
-	
-	// Reselect INBOX
-	if _, err := c.client.Select("INBOX", nil).Wait(); err != nil {
-		c.mu.Lock()
-		c.failureCount++
-		c.lastFailure = time.Now()
-		c.mu.Unlock()
-		return fmt.Errorf("failed to reselect INBOX: %w", err)
-	}
-	
-	// Success - reset failure counter
-	c.mu.Lock()
-	c.failureCount = 0
-	c.mu.Unlock()
-	c.log.Info().Msg("Successfully reconnected to IMAP server")
-	
-	return nil
+	// Use retry with exponential backoff
+	return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
+		c.log.Info().Msg("Attempting IMAP reconnection")
+		return c.circuitBreaker.Execute(func() error {
+			return c.connectInternal()
+		})
+	})
 }
 
 // Shutdown gracefully shuts down the client
@@ -1332,20 +1312,29 @@ func (c *Client) TestConnection() error {
 	
 	// Send NOOP command to test connection health
 	// This will fail if the connection is stale or if there are server-side issues
-	noopCmd := client.Noop()
-	if err := noopCmd.Wait(); err != nil {
-		// If this looks like a hard network error, force-clear state so callers can reconnect
-		if isHardNetErr(err) {
-			c.mu.Lock()
-			if c.client != nil {
-				c.client.Close()
-				c.client = nil
+	noopErr := make(chan error, 1)
+	go func() {
+		noopErr <- client.Noop().Wait()
+	}()
+	
+	select {
+	case err := <-noopErr:
+		if err != nil {
+			// If this looks like a hard network error, force-clear state so callers can reconnect
+			if isHardNetErr(err) {
+				c.mu.Lock()
+				if c.client != nil {
+					c.client.Close()
+					c.client = nil
+				}
+				c.connected = false
+				c.idling = false
+				c.mu.Unlock()
 			}
-			c.connected = false
-			c.idling = false
-			c.mu.Unlock()
+			return fmt.Errorf("NOOP command failed: %w", err)
 		}
-		return fmt.Errorf("NOOP command failed: %w", err)
+	case <-time.After(c.timeoutConfig.Command):
+		return fmt.Errorf("NOOP command timed out after %v", c.timeoutConfig.Command)
 	}
 	
 	c.log.Debug().Msg("Connection test successful (NOOP command completed)")
