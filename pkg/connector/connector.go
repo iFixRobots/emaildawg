@@ -160,6 +160,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		CommandSync,
 		CommandReconnect,
 		CommandNuke,
+		CommandPassphrase,
 	)
 }
 

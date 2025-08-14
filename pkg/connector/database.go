@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -56,11 +57,20 @@ var (
 
 func getDBKey() ([]byte, error) {
 	keyOnce.Do(func() {
-		// Use PBKDF2 with passphrase for better security
+		// Step 1: Check environment variable (highest priority for production)
 		passphrase := strings.TrimSpace(os.Getenv("EMAILDAWG_PASSPHRASE"))
+		
+		// Step 2: Check for passphrase file if env var not set
 		if passphrase == "" {
-			keyErr = errors.New("EMAILDAWG_PASSPHRASE environment variable is required for secure credential storage")
-			return
+			passphrase, _ = readPassphraseFile()
+		}
+		
+		// Step 3: Auto-generate secure passphrase if neither exists
+		if passphrase == "" {
+			passphrase, keyErr = generateAndStorePassphrase()
+			if keyErr != nil {
+				return
+			}
 		}
 		
 		salt, err := getSalt()
@@ -79,6 +89,88 @@ func getDBKey() ([]byte, error) {
 		return nil, fmt.Errorf("derived key must be 32 bytes, got %d", len(dbKey))
 	}
 	return dbKey, nil
+}
+
+// getUserConfigDir returns the user's config directory for cross-platform support
+func getUserConfigDir() (string, error) {
+	// Check XDG_CONFIG_HOME first (Linux/Unix)
+	if configDir := os.Getenv("XDG_CONFIG_HOME"); configDir != "" {
+		return filepath.Join(configDir, "emaildawg"), nil
+	}
+	
+	// Get user home directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	
+	// Platform-specific config paths
+	switch runtime.GOOS {
+	case "windows":
+		return filepath.Join(homeDir, "AppData", "Roaming", "EmailDawg"), nil
+	case "darwin":
+		return filepath.Join(homeDir, "Library", "Application Support", "EmailDawg"), nil
+	default: // Linux and other Unix-like systems
+		return filepath.Join(homeDir, ".config", "emaildawg"), nil
+	}
+}
+
+// getPassphraseFilePath returns the path to the passphrase file
+func getPassphraseFilePath() (string, error) {
+	configDir, err := getUserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "passphrase"), nil
+}
+
+// readPassphraseFile reads passphrase from the user config file
+func readPassphraseFile() (string, error) {
+	passphrasePath, err := getPassphraseFilePath()
+	if err != nil {
+		return "", err
+	}
+	
+	data, err := os.ReadFile(passphrasePath)
+	if err != nil {
+		return "", err
+	}
+	
+	return strings.TrimSpace(string(data)), nil
+}
+
+// generateAndStorePassphrase creates a new secure passphrase and stores it
+func generateAndStorePassphrase() (string, error) {
+	// Generate 32 random bytes for a secure passphrase
+	randomBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
+		return "", fmt.Errorf("failed to generate random passphrase: %w", err)
+	}
+	
+	// Encode as base64 for storage
+	passphrase := base64.StdEncoding.EncodeToString(randomBytes)
+	
+	// Get passphrase file path
+	passphrasePath, err := getPassphraseFilePath()
+	if err != nil {
+		return "", err
+	}
+	
+	// Create config directory with secure permissions
+	configDir := filepath.Dir(passphrasePath)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return "", fmt.Errorf("failed to create config directory: %w", err)
+	}
+	
+	// Write passphrase file with secure permissions
+	if err := os.WriteFile(passphrasePath, []byte(passphrase), 0o600); err != nil {
+		return "", fmt.Errorf("failed to write passphrase file: %w", err)
+	}
+	
+	fmt.Printf("Auto-generated secure passphrase stored at: %s\n", passphrasePath)
+	fmt.Println("EmailDawg is now ready to use! Your credentials will be securely encrypted.")
+	
+	return passphrase, nil
 }
 
 // getSalt returns the salt for PBKDF2, generating one if needed
@@ -163,7 +255,7 @@ func encryptString(plain string) (string, error) {
 func decryptString(stored string) (string, error) {
 	// Check for old v1 encrypted data and provide helpful error message
 	if strings.HasPrefix(stored, "v1:") {
-		return "", errors.New("cannot decrypt old v1 encrypted data - please delete your database and reconfigure your email accounts with the new secure system using EMAILDAWG_PASSPHRASE environment variable")
+		return "", errors.New("cannot decrypt old v1 encrypted data - please delete your database and reconfigure your email accounts with the new secure system")
 	}
 	
 	// Only accept v2 encrypted data

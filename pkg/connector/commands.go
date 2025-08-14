@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -96,6 +97,17 @@ var (
 			Section:     HelpSectionAdmin,
 			Description: "Delete all bridge state (database). Requires explicit confirmation: !email nuke confirm",
 			Args:        "[confirm]",
+		},
+		RequiresLogin: false,
+	}
+
+	CommandPassphrase = &commands.FullHandler{
+		Func: fnPassphrase,
+		Name: "passphrase",
+		Help: commands.HelpMeta{
+			Section:     HelpSectionAuth,
+			Description: "Manage encryption passphrase: generate, show-location, or set new passphrase",
+			Args:        "[generate|show-location|set <passphrase>]",
 		},
 		RequiresLogin: false,
 	}
@@ -725,4 +737,145 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 *The bridge will test your IMAP connection automatically after you submit your credentials.*
 
 **Need help?** Use ` + "`!email help`" + ` for more information or ` + "`!email status`" + ` to check connection status.`
+}
+
+func fnPassphrase(ce *commands.Event) {
+	
+	// Parse command arguments
+	if len(ce.Args) == 0 {
+		// Show current status and usage
+		passphrasePath, err := getPassphraseFilePath()
+		if err != nil {
+			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
+			return
+		}
+		
+		// Check if passphrase file exists
+		exists := false
+		if _, err := os.Stat(passphrasePath); err == nil {
+			exists = true
+		}
+		
+		// Check if environment variable is set
+		envSet := strings.TrimSpace(os.Getenv("EMAILDAWG_PASSPHRASE")) != ""
+		
+		ce.Reply(`🔐 **Encryption Passphrase Status**
+
+**Environment Variable:** %s
+**Passphrase File:** %s
+**File Location:** %s
+
+**Usage:**
+• ` + "`!email passphrase generate`" + ` - Generate new secure passphrase
+• ` + "`!email passphrase show-location`" + ` - Show passphrase file path  
+• ` + "`!email passphrase set <passphrase>`" + ` - Set custom passphrase
+
+**Security Note:** Your email passwords are encrypted using this passphrase. EmailDawg automatically generates one if neither environment variable nor file exists.`, 
+			map[bool]string{true: "✅ Set", false: "❌ Not set"}[envSet],
+			map[bool]string{true: "✅ Exists", false: "❌ Not found"}[exists],
+			passphrasePath)
+		return
+	}
+	
+	command := strings.ToLower(ce.Args[0])
+	
+	switch command {
+	case "generate":
+		// Generate new passphrase
+		passphrase, err := generateAndStorePassphrase()
+		if err != nil {
+			ce.Reply("❌ Failed to generate passphrase: %s", err.Error())
+			return
+		}
+		
+		passphrasePath, _ := getPassphraseFilePath()
+		ce.Reply(`✅ **New secure passphrase generated!**
+
+**Passphrase:** ` + "`%s`" + `
+**Stored at:** %s
+**Permissions:** 0600 (owner read/write only)
+
+⚠️ **Important:** This passphrase encrypts your email passwords. Keep it secure!
+
+**Next Steps:**
+• Your existing email accounts will continue to work
+• New logins will use this passphrase for encryption
+• You can also set EMAILDAWG_PASSPHRASE environment variable for production use`, 
+			passphrase, passphrasePath)
+			
+	case "show-location":
+		passphrasePath, err := getPassphraseFilePath()
+		if err != nil {
+			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
+			return
+		}
+		
+		// Check if file exists
+		exists := false
+		if _, err := os.Stat(passphrasePath); err == nil {
+			exists = true
+		}
+		
+		ce.Reply(`📍 **Passphrase File Location**
+
+**Path:** %s
+**Status:** %s
+
+**Platform-specific locations:**
+• **Linux:** ~/.config/emaildawg/passphrase
+• **macOS:** ~/Library/Application Support/EmailDawg/passphrase  
+• **Windows:** %%APPDATA%%\Roaming\EmailDawg\passphrase
+
+You can also set the EMAILDAWG_PASSPHRASE environment variable instead of using a file.`,
+			passphrasePath,
+			map[bool]string{true: "✅ File exists", false: "❌ File not found"}[exists])
+			
+	case "set":
+		if len(ce.Args) < 2 {
+			ce.Reply("❌ Missing passphrase argument.\n\n**Usage:** `!email passphrase set <your-passphrase>`")
+			return
+		}
+		
+		// Join remaining args as the passphrase (in case it has spaces)
+		passphrase := strings.Join(ce.Args[1:], " ")
+		if len(passphrase) < 8 {
+			ce.Reply("❌ Passphrase must be at least 8 characters long for security.")
+			return
+		}
+		
+		// Get passphrase file path
+		passphrasePath, err := getPassphraseFilePath()
+		if err != nil {
+			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
+			return
+		}
+		
+		// Create config directory with secure permissions
+		configDir := filepath.Dir(passphrasePath)
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			ce.Reply("❌ Failed to create config directory: %s", err.Error())
+			return
+		}
+		
+		// Write passphrase file with secure permissions
+		if err := os.WriteFile(passphrasePath, []byte(passphrase), 0o600); err != nil {
+			ce.Reply("❌ Failed to write passphrase file: %s", err.Error())
+			return
+		}
+		
+		ce.Reply(`✅ **Custom passphrase set successfully!**
+
+**Stored at:** %s
+**Permissions:** 0600 (owner read/write only)
+
+⚠️ **Important:** 
+• This passphrase now encrypts your email passwords
+• Existing email accounts will continue to work
+• Make sure to remember this passphrase or store it securely
+• You can override this by setting EMAILDAWG_PASSPHRASE environment variable`,
+			passphrasePath)
+			
+	default:
+		ce.Reply("❌ Unknown command: %s\n\n**Available commands:**\n• `generate` - Generate new secure passphrase\n• `show-location` - Show passphrase file location\n• `set <passphrase>` - Set custom passphrase", command)
+	}
 }
