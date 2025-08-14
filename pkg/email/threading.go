@@ -62,17 +62,20 @@ const (
 type ThreadManager struct {
 	// Cache of known threads with size and TTL limits to prevent memory leaks
 	knownThreads map[string]*EmailThread // key: receiver|threadID
-	mu           sync.RWMutex
-	resolver     ThreadMetadataResolver // optional external resolver
-	lastCleanup  time.Time               // Last time we ran cache cleanup
+	// Performance optimization: message ID -> thread lookup index
+	messageIDIndex map[string]*EmailThread // key: messageID, value: thread containing that message
+	mu             sync.RWMutex
+	resolver       ThreadMetadataResolver // optional external resolver
+	lastCleanup    time.Time               // Last time we ran cache cleanup
 }
 
 // NewThreadManager creates a new email thread manager
 func NewThreadManager(resolver ThreadMetadataResolver) *ThreadManager {
 	return &ThreadManager{
-		knownThreads: make(map[string]*EmailThread),
-		resolver:     resolver,
-		lastCleanup:  time.Now(),
+		knownThreads:   make(map[string]*EmailThread),
+		messageIDIndex: make(map[string]*EmailThread),
+		resolver:       resolver,
+		lastCleanup:    time.Now(),
 	}
 }
 
@@ -112,9 +115,30 @@ func (tm *ThreadManager) cacheThread(receiver string, thread *EmailThread) {
 	thread.LastAccessed = time.Now()
 	tm.knownThreads[key] = thread
 	
+	// Update message ID index for fast lookups
+	tm.updateMessageIDIndex(thread)
+	
 	// Enforce cache size limit
 	if len(tm.knownThreads) > maxCachedThreads {
 		tm.evictOldestThreads(maxCachedThreads / 4) // Remove 25% when limit exceeded
+	}
+}
+
+// updateMessageIDIndex maintains the message ID -> thread index
+func (tm *ThreadManager) updateMessageIDIndex(thread *EmailThread) {
+	// Index the thread ID itself
+	if thread.ThreadID != "" {
+		tm.messageIDIndex[thread.ThreadID] = thread
+	}
+	// Index all message IDs in the references chain
+	for _, ref := range thread.References {
+		if ref != "" {
+			tm.messageIDIndex[ref] = thread
+		}
+	}
+	// Index the current message ID if different from thread ID
+	if thread.MessageID != "" && thread.MessageID != thread.ThreadID {
+		tm.messageIDIndex[thread.MessageID] = thread
 	}
 }
 
@@ -191,17 +215,9 @@ func (tm *ThreadManager) findThreadByMessageID(messageID string) *EmailThread {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	
-	for _, thread := range tm.knownThreads {
-		// Check if this message ID is the thread root
-		if thread.ThreadID == messageID {
-			return thread
-		}
-		// Check if this message ID is in the references chain
-		for _, ref := range thread.References {
-			if ref == messageID {
-				return thread
-			}
-		}
+	// Use O(1) index lookup instead of O(n) linear search
+	if thread, exists := tm.messageIDIndex[messageID]; exists {
+		return thread
 	}
 	return nil
 }
@@ -279,7 +295,13 @@ func (tm *ThreadManager) addToExistingThread(thread *EmailThread, email *ParsedE
 	// Update references chain
 	if email.MessageID != "" {
 		// Add this message to the references chain
+		oldRefsLen := len(thread.References)
 		thread.References = appendUnique(thread.References, email.MessageID)
+		
+		// If references were updated, update the index (only if we have the lock)
+		if len(thread.References) > oldRefsLen {
+			tm.messageIDIndex[email.MessageID] = thread
+		}
 	}
 
 	return thread
@@ -469,6 +491,10 @@ func (tm *ThreadManager) cleanupExpiredThreadsIfNeeded() {
 	}
 	
 	for _, key := range expiredKeys {
+		// Remove from main cache and also clean up message ID index
+		if thread := tm.knownThreads[key]; thread != nil {
+			tm.removeFromMessageIDIndex(thread)
+		}
 		delete(tm.knownThreads, key)
 	}
 }
@@ -508,7 +534,26 @@ func (tm *ThreadManager) evictOldestThreads(countToRemove int) {
 		if removedCount >= countToRemove {
 			break
 		}
+		// Remove from main cache and clean up message ID index
+		if thread := tm.knownThreads[entry.key]; thread != nil {
+			tm.removeFromMessageIDIndex(thread)
+		}
 		delete(tm.knownThreads, entry.key)
 		removedCount++
+	}
+}
+
+// removeFromMessageIDIndex removes all entries for a thread from the message ID index
+func (tm *ThreadManager) removeFromMessageIDIndex(thread *EmailThread) {
+	if thread.ThreadID != "" {
+		delete(tm.messageIDIndex, thread.ThreadID)
+	}
+	if thread.MessageID != "" {
+		delete(tm.messageIDIndex, thread.MessageID)
+	}
+	for _, ref := range thread.References {
+		if ref != "" {
+			delete(tm.messageIDIndex, ref)
+		}
 	}
 }

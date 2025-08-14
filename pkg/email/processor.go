@@ -643,9 +643,10 @@ func formatIMAPAddressSlice(addrs []imap.Address) []string {
 		return nil
 	}
 
-	result := make([]string, len(addrs))
-	for i, addr := range addrs {
-		result[i] = formatIMAPAddress(&addr)
+	// Pre-allocate with exact size to avoid reallocations
+	result := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		result = append(result, formatIMAPAddress(&addr))
 	}
 	return result
 }
@@ -762,12 +763,15 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 	}()
 
 	// Preprocess inline images for HTML
-	usedInline := make(map[int]bool)
+	// Pre-size maps based on typical attachment counts to reduce allocations
+	attachmentCount := len(e.emailMessage.Attachments)
+	usedInline := make(map[int]bool, attachmentCount)
 	// For CSS url(cid:...) rewriting later
-	cidToMXC := make(map[string]string)
-	locToMXC := make(map[string]string)
+	cidToMXC := make(map[string]string, attachmentCount)
+	locToMXC := make(map[string]string, attachmentCount)
 	// Inline images we will send as sidecar m.image events, in document order
-	var inlineImages []*InlineImageMeta
+	// Pre-allocate with reasonable capacity to reduce reallocations
+	inlineImages := make([]*InlineImageMeta, 0, attachmentCount/2)
 	nextIndex := 1
 
 	origHTML := e.emailMessage.HTMLContent

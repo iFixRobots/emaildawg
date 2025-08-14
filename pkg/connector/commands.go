@@ -371,9 +371,9 @@ Need help? Use ` + "`!email help`" + ` for more information.
 		return
 	}
 
-	// Get real account list from database
+	// Get real account list from database (without passwords for performance)
 	ctx := context.Background()
-	accounts, err := ConnectorInstance.DB.GetUserAccounts(ctx, ce.User.MXID.String())
+	accounts, err := ConnectorInstance.DB.GetUserAccountsBasic(ctx, ce.User.MXID.String())
 	if err != nil {
 		ce.Reply("❌ Failed to get account list: %s", err.Error())
 		return

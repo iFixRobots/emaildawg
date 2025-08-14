@@ -200,6 +200,7 @@ func decryptString(stored string) (string, error) {
 }
 
 func (eaq *EmailAccountQuery) CreateTable(ctx context.Context) error {
+	// Create table
 	_, err := eaq.DB.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS email_accounts (
 			user_mxid TEXT NOT NULL,
@@ -214,6 +215,24 @@ func (eaq *EmailAccountQuery) CreateTable(ctx context.Context) error {
 			PRIMARY KEY (user_mxid, email)
 		)
 	`)
+	if err != nil {
+		return err
+	}
+	
+	// Create performance indexes
+	_, err = eaq.DB.Exec(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_email_accounts_user_created 
+		ON email_accounts(user_mxid, created_at)
+	`)
+	if err != nil {
+		return err
+	}
+	
+	_, err = eaq.DB.Exec(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_email_accounts_last_sync 
+		ON email_accounts(user_mxid, last_sync_time)
+	`)
+	
 	return err
 }
 
@@ -276,6 +295,36 @@ func (eaq *EmailAccountQuery) GetUserAccounts(ctx context.Context, userMXID stri
 			return nil, fmt.Errorf("failed to decrypt stored password: %w", derr)
 		}
 		account.Password = plain
+		accounts = append(accounts, account)
+	}
+	return accounts, rows.Err()
+}
+
+// GetUserAccountsBasic returns user accounts without decrypting passwords (for display/status)
+func (eaq *EmailAccountQuery) GetUserAccountsBasic(ctx context.Context, userMXID string) ([]*EmailAccount, error) {
+	rows, err := eaq.DB.Query(ctx, `
+		SELECT user_mxid, email, username, host, port, tls, created_at, last_sync_time
+		FROM email_accounts
+		WHERE user_mxid = ?
+		ORDER BY created_at ASC
+	`, userMXID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	// Pre-allocate slice with reasonable capacity to reduce reallocations
+	accounts := make([]*EmailAccount, 0, 4)
+	for rows.Next() {
+		account := &EmailAccount{}
+		err = rows.Scan(
+			&account.UserMXID, &account.Email, &account.Username,
+			&account.Host, &account.Port, &account.TLS, &account.CreatedAt, &account.LastSyncTime,
+		)
+		if err != nil {
+			return nil, err
+		}
+		// Password is left empty for basic account info
 		accounts = append(accounts, account)
 	}
 	return accounts, rows.Err()
