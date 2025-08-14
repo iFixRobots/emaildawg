@@ -715,8 +715,14 @@ idleCmd, err := cli.Idle()
 			
 		case <-timeoutTimer.C:
 			c.log.Debug().Msg("IDLE timeout reached, checking for messages and restarting")
-			// Close current IDLE session
-			idleCmd.Close()
+			// Close current IDLE session and wait for it to complete
+			if err := idleCmd.Close(); err != nil {
+				c.log.Warn().Err(err).Msg("Error closing IDLE command")
+			}
+			
+			// Wait a moment for server to process IDLE termination
+			// This prevents "UID SEARCH not allowed now" errors
+			time.Sleep(100 * time.Millisecond)
 			
 			// Check for new messages
 			if err := c.CheckNewMessages(); err != nil {
@@ -1594,7 +1600,14 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 			return
 		case <-timer.C:
 			// Close IDLE and check for new messages in Sent
-			_ = idleCmd.Close()
+			if err := idleCmd.Close(); err != nil {
+				c.log.Warn().Err(err).Msg("Error closing Sent IDLE command")
+			}
+			
+			// Wait a moment for server to process IDLE termination
+			// This prevents "UID SEARCH not allowed now" errors on Sent mailbox
+			time.Sleep(100 * time.Millisecond)
+			
 			if err := c.checkNewMessagesFor(cli, c.sentFolder, true); err != nil {
 				c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Sent check on IDLE timeout failed")
 				// If client handle is bad/unavailable, rebuild Sent connection
