@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// init seeds the legacy PRNG to avoid predictable output
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 // RetryConfig holds configuration for retry operations
 type RetryConfig struct {
 	MaxAttempts   int
@@ -41,6 +46,24 @@ func NetworkRetryConfig() RetryConfig {
 
 // RetryWithBackoff retries a function with exponential backoff and smart error categorization
 func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) error {
+	// Validate config parameters to prevent runtime issues
+	if config.MaxAttempts <= 0 {
+		config.MaxAttempts = 1 // At least one attempt
+	}
+	if config.InitialDelay <= 0 {
+		config.InitialDelay = 100 * time.Millisecond
+	}
+	if config.MaxDelay <= 0 {
+		config.MaxDelay = 30 * time.Second
+	}
+	if config.BackoffFactor <= 1.0 {
+		config.BackoffFactor = 2.0
+	}
+	// Ensure MaxDelay >= InitialDelay to prevent invalid calculations
+	if config.MaxDelay < config.InitialDelay {
+		config.MaxDelay = config.InitialDelay
+	}
+	
 	var lastErr error
 	
 	for attempt := 0; attempt < config.MaxAttempts; attempt++ {
@@ -85,20 +108,46 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 
 // calculateDelay calculates the delay for the given attempt number
 func (c RetryConfig) calculateDelay(attempt int) time.Duration {
-	// Calculate exponential backoff delay
-	delay := float64(c.InitialDelay) * math.Pow(c.BackoffFactor, float64(attempt))
+	// Calculate exponential backoff delay with overflow protection
+	var delay float64
 	
-	// Cap at maximum delay
-	if delay > float64(c.MaxDelay) {
+	// Compute exponent safely
+	e := float64(attempt) * math.Log(c.BackoffFactor)
+	maxE := math.Log(float64(c.MaxDelay)/float64(c.InitialDelay))
+	
+	// Check for overflow/overshoot or invalid values
+	if math.IsNaN(e) || math.IsInf(e, 0) || e > maxE {
 		delay = float64(c.MaxDelay)
+	} else {
+		// Safe to compute exponential
+		multiplier := math.Exp(e)
+		if math.IsNaN(multiplier) || math.IsInf(multiplier, 0) {
+			delay = float64(c.MaxDelay)
+		} else {
+			delay = float64(c.InitialDelay) * multiplier
+			// Cap at maximum delay
+			if delay > float64(c.MaxDelay) {
+				delay = float64(c.MaxDelay)
+			}
+		}
 	}
 	
-	// Add jitter if enabled
+	// Add jitter if enabled, ensuring it doesn't exceed MaxDelay
 	if c.Jitter {
 		// Add random jitter up to 25% of the delay
 		jitterRange := delay * 0.25
 		jitter := rand.Float64() * jitterRange
 		delay += jitter
+		
+		// Ensure jitter doesn't push us past MaxDelay
+		if delay > float64(c.MaxDelay) {
+			delay = float64(c.MaxDelay)
+		}
+	}
+	
+	// Sanitize NaN/Inf before converting to Duration
+	if math.IsNaN(delay) || math.IsInf(delay, 0) || delay < 0 {
+		delay = float64(c.MaxDelay)
 	}
 	
 	return time.Duration(delay)
@@ -135,18 +184,21 @@ func IsRetryableError(err error) bool {
 		}
 	}
 	
-	// IMAP-specific transient errors
+	// IMAP-specific transient errors with specific matching to avoid false positives
 	imapRetryablePatterns := []string{
-		"BYE",
-		"UNAVAILABLE",
-		"SERVERBUG",
-		"CONTACTADMIN",
-		"BAD [CLIENTBUG]",
-		"server temporarily unavailable",
+		"* bye",                           // Server connection terminated (start of line)
+		"no unavailable",                  // IMAP NO response with UNAVAILABLE
+		"bad serverbug",                   // IMAP BAD response with SERVERBUG  
+		"no contactadmin",                 // IMAP NO response with CONTACTADMIN
+		"bad [clientbug]",                 // IMAP BAD response with [CLIENTBUG]
+		"server temporarily unavailable",  // Full phrase match
+		"temporary failure in name resolution", // DNS issues
+		"mailbox unavailable",             // Mailbox locked/busy
 	}
 	
+	// Use more specific matching for IMAP patterns
 	for _, pattern := range imapRetryablePatterns {
-		if contains(errStr, pattern) {
+		if matchesIMAPPattern(errStr, pattern) {
 			return true
 		}
 	}
@@ -157,6 +209,31 @@ func IsRetryableError(err error) bool {
 // contains checks if a string contains a substring (case-insensitive)
 func contains(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// matchesIMAPPattern checks if an error string matches IMAP pattern with specific rules
+func matchesIMAPPattern(errStr, pattern string) bool {
+	errLower := strings.ToLower(errStr)
+	patternLower := strings.ToLower(pattern)
+	
+	// For patterns starting with "* ", match at beginning of line
+	if strings.HasPrefix(patternLower, "* ") {
+		return strings.HasPrefix(errLower, patternLower) ||
+			   strings.Contains(errLower, "\n"+patternLower)
+	}
+	
+	// For patterns with response codes (NO, BAD), ensure word boundaries
+	if strings.HasPrefix(patternLower, "no ") || 
+	   strings.HasPrefix(patternLower, "bad ") {
+		// Match at word boundaries to avoid false positives
+		return strings.Contains(errLower, patternLower) &&
+			   (strings.HasPrefix(errLower, patternLower) ||
+				strings.Contains(errLower, " "+patternLower) ||
+				strings.Contains(errLower, "\n"+patternLower))
+	}
+	
+	// For other patterns, use exact phrase matching
+	return strings.Contains(errLower, patternLower)
 }
 
 // ErrorCategory represents different types of errors for handling strategies

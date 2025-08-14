@@ -2,6 +2,7 @@ package reliability
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -46,6 +47,12 @@ func WithTimeout(timeout time.Duration, fn func(ctx context.Context) error) erro
 	
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			// Recover from any panic in fn to prevent goroutine leak
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic in timeout function: %v", r)
+			}
+		}()
 		done <- fn(ctx)
 	}()
 	
@@ -53,6 +60,16 @@ func WithTimeout(timeout time.Duration, fn func(ctx context.Context) error) erro
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		// Wait for goroutine to finish with a grace period to prevent leak
+		go func() {
+			select {
+			case <-done:
+				// Function completed after timeout, drain the channel
+			case <-time.After(5 * time.Second):
+				// Log warning about potential goroutine leak after grace period
+				// Note: In production, you'd want to use a proper logger here
+			}
+		}()
 		return ctx.Err()
 	}
 }
@@ -64,6 +81,12 @@ func WithDeadline(deadline time.Time, fn func(ctx context.Context) error) error 
 	
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			// Recover from any panic in fn to prevent goroutine leak
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic in deadline function: %v", r)
+			}
+		}()
 		done <- fn(ctx)
 	}()
 	
@@ -71,6 +94,16 @@ func WithDeadline(deadline time.Time, fn func(ctx context.Context) error) error 
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		// Wait for goroutine to finish with a grace period to prevent leak
+		go func() {
+			select {
+			case <-done:
+				// Function completed after deadline, drain the channel
+			case <-time.After(5 * time.Second):
+				// Log warning about potential goroutine leak after grace period
+				// Note: In production, you'd want to use a proper logger here
+			}
+		}()
 		return ctx.Err()
 	}
 }

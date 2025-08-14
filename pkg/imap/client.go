@@ -275,8 +275,16 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		secret:       secret,
 		stopIdle:     make(chan struct{}),
 		reconnect:    make(chan struct{}, 1),
-		// Reliability components
-		circuitBreaker: reliability.NewCircuitBreaker(5, 2*time.Minute),
+		// Reliability components - handle error from NewCircuitBreaker
+		circuitBreaker: func() *reliability.CircuitBreaker {
+			cb, err := reliability.NewCircuitBreaker(5, 2*time.Minute)
+			if err != nil {
+				// Should not happen with valid inputs, but fallback
+				log.Error().Err(err).Msg("Failed to create circuit breaker")
+				return nil
+			}
+			return cb
+		}(),
 		retryConfig:    reliability.NetworkRetryConfig(),
 		timeoutConfig:  reliability.IMAPTimeouts(),
 		// Context management
@@ -309,9 +317,13 @@ func (c *Client) Connect() error {
 	defer func() { c.isConnecting = false }()
 
 	// Use circuit breaker to protect against repeated connection failures
-	return c.circuitBreaker.Execute(func() error {
-		return c.connectInternal()
-	})
+	if c.circuitBreaker != nil {
+		return c.circuitBreaker.Execute(func() error {
+			return c.connectInternal()
+		})
+	}
+	// Fallback if circuit breaker creation failed
+	return c.connectInternal()
 }
 
 // connectInternal performs the actual connection logic without connection guards
@@ -1165,7 +1177,7 @@ func (c *Client) reconnectClient() error {
 	defer func() { c.isConnecting = false }()
 	
 	// Check circuit breaker first
-	if c.circuitBreaker.GetState() == reliability.StateOpen {
+	if c.circuitBreaker != nil && c.circuitBreaker.GetState() == reliability.StateOpen {
 		return fmt.Errorf("circuit breaker open: too many failures (%d)", c.circuitBreaker.GetFailures())
 	}
 	
@@ -1175,9 +1187,12 @@ func (c *Client) reconnectClient() error {
 	// Use retry with exponential backoff
 	return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
 		c.log.Info().Msg("Attempting IMAP reconnection")
-		return c.circuitBreaker.Execute(func() error {
-			return c.connectInternal()
-		})
+		if c.circuitBreaker != nil {
+			return c.circuitBreaker.Execute(func() error {
+				return c.connectInternal()
+			})
+		}
+		return c.connectInternal()
 	})
 }
 
