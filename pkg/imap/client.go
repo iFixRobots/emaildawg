@@ -622,32 +622,47 @@ func (c *Client) idleLoop() {
 			return
 		case <-c.reconnect:
 			c.log.Info().Msg("Reconnecting IMAP client (signal)")
-			if err := c.reconnectClient(); err != nil {
-				c.log.Error().Err(err).Msg("Failed to reconnect (signal)")
-				// Wait before retrying
-				time.Sleep(30 * time.Second)
-				continue
+			// Use circuit breaker for reconnection attempts to prevent rapid failures
+			if c.circuitBreaker != nil {
+				err := c.circuitBreaker.Execute(func() error {
+					return c.reconnectClient()
+				})
+				if err != nil {
+					c.log.Error().Err(err).Msg("Circuit breaker rejected reconnection attempt or reconnection failed")
+					// Circuit breaker will handle backoff timing - just continue the loop
+					continue
+				}
+			} else {
+				// Fallback if circuit breaker creation failed
+				if err := c.reconnectClient(); err != nil {
+					c.log.Error().Err(err).Msg("Failed to reconnect (signal) - fallback mode")
+					continue
+				}
 			}
 			// After successful reconnect, loop to start IDLE again
 			continue
 		default:
 			if err := c.runIDLE(); err != nil {
-				c.log.Error().Err(err).Msg("IDLE failed, performing full reconnect")
+				c.log.Error().Err(err).Msg("IDLE failed, attempting recovery through circuit breaker")
+				
 				// Demote bridge state for this login while we attempt recovery
 				c.sendBridgeState(status.BridgeState{
 					StateEvent: status.StateUnknownError,
-					Source:     "network",
+					Source:     "network", 
 					Info:       map[string]any{"component": "imap", "reason": "idle_failed"},
 					TTL:        300,
 				})
-				if recErr := c.reconnectClient(); recErr != nil {
-					c.log.Error().Err(recErr).Msg("Reconnect after IDLE failure failed")
-					// Back off before trying again
-					time.Sleep(30 * time.Second)
+				
+				// Use circuit breaker and retry logic instead of crude sleep
+				recoveryErr := c.performIDLERecovery()
+				if recoveryErr != nil {
+					c.log.Error().Err(recoveryErr).Msg("IDLE recovery failed - circuit breaker may have opened")
+					// Circuit breaker handles timing - continue immediately to check state
 					continue
 				}
-				c.log.Info().Msg("Reconnected successfully after IDLE failure")
-				// Promote bridge state back to connected after successful reconnect
+				
+				c.log.Info().Msg("IDLE recovery successful")
+				// Promote bridge state back to connected after successful recovery
 				c.sendBridgeState(status.BridgeState{StateEvent: status.StateConnected})
 				continue
 			}
@@ -926,9 +941,9 @@ case response := <-searchDone:
 			return fmt.Errorf("failed to search for new messages: %w", response.err)
 		}
 		searchResult = response.result
-case <-time.After(30 * time.Second):
-		c.log.Error().Msg("IMAP search timed out after 30 seconds")
-		return fmt.Errorf("IMAP search timed out")
+case <-time.After(c.timeoutConfig.Command):
+		c.log.Error().Dur("timeout", c.timeoutConfig.Command).Msg("IMAP search timed out")
+		return fmt.Errorf("IMAP search timed out after %v", c.timeoutConfig.Command)
 	}
 	
 	c.log.Debug().Msg("IMAP search completed")
@@ -1456,13 +1471,13 @@ func (c *Client) safeStartIDLE() error {
 		done <- nil // Success
 	}()
 	
-// Wait with timeout
+// Wait with timeout - use command timeout from config for consistency
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(10 * time.Second):
-		c.log.Error().Msg("IDLE restart timed out after 10 seconds")
-		return fmt.Errorf("IDLE restart timed out")
+	case <-time.After(c.timeoutConfig.Command):
+		c.log.Error().Dur("timeout", c.timeoutConfig.Command).Msg("IDLE restart timed out")
+		return fmt.Errorf("IDLE restart timed out after %v", c.timeoutConfig.Command)
 	}
 }
 
@@ -1751,7 +1766,10 @@ func isHardNetErr(err error) bool {
 		strings.Contains(s, "broken pipe") ||
 		strings.Contains(s, "unexpected eof") ||
 		strings.Contains(s, "eof") ||
-		strings.Contains(s, "i/o timeout")
+		strings.Contains(s, "i/o timeout") ||
+		strings.Contains(s, "operation timed out") ||
+		strings.Contains(s, "cannot read tag") ||
+		strings.Contains(s, "connection timed out")
 }
 
 // resetConnection forces a complete disconnection and reconnection to clear server-side state
@@ -1788,4 +1806,36 @@ func (c *Client) resetConnection() error {
 	
 	// Try IDLE again on the fresh connection
 	return c.StartIDLE()
+}
+
+// performIDLERecovery uses circuit breaker and retry logic for IDLE failure recovery
+func (c *Client) performIDLERecovery() error {
+	if c.circuitBreaker == nil {
+		// Fallback to direct reconnection if circuit breaker unavailable
+		c.log.Warn().Msg("Circuit breaker unavailable, using direct reconnection")
+		return c.reconnectClient()
+	}
+	
+	// Use circuit breaker with retry logic for robust recovery
+	return c.circuitBreaker.Execute(func() error {
+		// Use RetryWithBackoff for the actual reconnection attempt
+		return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
+			c.log.Info().Msg("Attempting IDLE recovery with circuit breaker protection")
+			
+			// First attempt to reconnect
+			if err := c.reconnectClient(); err != nil {
+				c.log.Warn().Err(err).Msg("Reconnection attempt failed during IDLE recovery")
+				return err
+			}
+			
+			// Then attempt to restart IDLE
+			if err := c.StartIDLE(); err != nil {
+				c.log.Warn().Err(err).Msg("IDLE restart failed during recovery")
+				return err
+			}
+			
+			c.log.Info().Msg("IDLE recovery completed successfully")
+			return nil
+		})
+	})
 }

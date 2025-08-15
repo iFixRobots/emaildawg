@@ -167,6 +167,7 @@ func IsRetryableError(err error) bool {
 		"connection reset",
 		"connection timeout",
 		"timeout",
+		"operation timed out",
 		"temporary failure",
 		"network unreachable",
 		"host unreachable",
@@ -176,6 +177,8 @@ func IsRetryableError(err error) bool {
 		"use of closed network connection",
 		"connection lost",
 		"server misbehaving",
+		"cannot read tag",
+		"unexpected eof",
 	}
 	
 	for _, pattern := range retryablePatterns {
