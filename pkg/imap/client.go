@@ -863,17 +863,22 @@ func (c *Client) primeBaselineAndBackfillFor(cli *imapclient.Client, mailbox str
 	}
 	c.log.Info().Int("count", len(uids)).Msg("Startup backfill: processing messages")
 	var highest imap.UID = baseline
+	var failureCount int
 	for _, uid := range uids {
 		if uid <= baseline {
 			continue
 		}
 		if err := c.processMessageWith(context.Background(), cli, uid, mailbox); err != nil {
+			failureCount++
 			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Startup backfill: failed to process message")
 			continue
 		}
 		if uid > highest {
 			highest = uid
 		}
+	}
+	if failureCount > 0 {
+		c.log.Warn().Int("failed_messages", failureCount).Int("total_messages", len(uids)).Msg("Startup backfill completed with some failures")
 	}
 	if highest > baseline {
 		c.mu.Lock()
@@ -1057,6 +1062,7 @@ case <-time.After(c.timeoutConfig.Command):
 	}
 	
 	// Process the new messages
+	var processingErrors []error
 	for _, uid := range newUIDs {
 		// De-duplicate concurrent processing of the same UID
 		if !c.startUID(uid, isSent) {
@@ -1064,6 +1070,7 @@ case <-time.After(c.timeoutConfig.Command):
 			continue
 		}
 		if err := c.processMessageWith(context.Background(), cli, uid, mailbox); err != nil {
+			processingErrors = append(processingErrors, fmt.Errorf("UID %d: %w", uid, err))
 			c.log.Error().Err(err).Uint32("uid", uint32(uid)).Msg("Failed to process message - will not reprocess this UID")
 			// Continue processing other messages even if one fails
 			// Note: lastUID was already updated above, so this message won't be reprocessed
@@ -1071,7 +1078,11 @@ case <-time.After(c.timeoutConfig.Command):
 		c.endUID(uid, isSent)
 	}
 	
-	c.log.Info().Str("mailbox", mailbox).Msg("Sync completed successfully")
+	if len(processingErrors) > 0 {
+		c.log.Warn().Int("failed_messages", len(processingErrors)).Int("total_messages", len(newUIDs)).Str("mailbox", mailbox).Msg("Sync completed with some failures")
+	} else {
+		c.log.Info().Str("mailbox", mailbox).Msg("Sync completed successfully")
+	}
 	return nil
 }
 
