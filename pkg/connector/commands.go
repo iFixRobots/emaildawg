@@ -514,6 +514,10 @@ func fnSync(ce *commands.Event) {
 					}
 				case <-ctx.Done():
 					failures = append(failures, fmt.Sprintf("%s: sync timed out after 60 seconds", client.Email))
+					// Drain the done channel to prevent goroutine leak
+					go func() {
+						<-done
+					}()
 				}
 			} else {
 				failures = append(failures, fmt.Sprintf("%s: not connected", client.Email))
