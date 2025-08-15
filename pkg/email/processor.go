@@ -758,7 +758,8 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "⚠️ Your email could not be fully processed by the bridge. The original message may have been dropped. Please report this to the bridge maintainers."}
 			appendPart("error-placeholder", n)
 			cm = &bridgev2.ConvertedMessage{Parts: parts}
-			err = nil
+			// Return proper error to caller while still providing placeholder message for user experience
+			err = fmt.Errorf("email conversion panicked during processing: %v", r)
 		}
 	}()
 

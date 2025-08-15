@@ -454,11 +454,8 @@ func (c *Client) connectInternal() error {
 		case err := <-done:
 			loginErr <- err
 		case <-loginCtx.Done():
-			// Context cancelled, but we still need to wait for the command to complete
-			// to avoid resource leaks
-			go func() {
-				<-done // Drain the channel to prevent goroutine leak
-			}()
+			// Context cancelled. The buffered 'done' channel will not block the 
+			// cmd.Wait() goroutine, so no explicit draining is needed.
 			loginErr <- loginCtx.Err()
 		}
 	}()
@@ -473,7 +470,11 @@ func (c *Client) connectInternal() error {
 				return fmt.Errorf("IMAP login timed out after %v", c.timeoutConfig.Command)
 			}
 			
-			c.log.Error().Err(err).Str("username", c.Username).Msg("IMAP authentication failed")
+			if c.sanitized {
+				c.log.Error().Err(err).Str("username_masked", logging.MaskEmail(c.Username)).Msg("IMAP authentication failed")
+			} else {
+				c.log.Error().Err(err).Str("username", c.Username).Msg("IMAP authentication failed")
+			}
 			conn.Close()
 			return fmt.Errorf("IMAP login failed: %w", err)
 		}
