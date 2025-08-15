@@ -21,6 +21,21 @@ import (
 	"github.com/iFixRobots/emaildawg/pkg/reliability"
 )
 
+// IMAP-specific error codes
+var (
+	EmailIdleFailed       = status.BridgeStateErrorCode("E-EMAIL-003")
+	EmailSentDisconnected = status.BridgeStateErrorCode("E-EMAIL-004")
+	EmailServerTimeout    = status.BridgeStateErrorCode("E-EMAIL-006")
+	EmailCircuitOpen      = status.BridgeStateErrorCode("E-EMAIL-007")
+	EmailServerConflict   = status.BridgeStateErrorCode("E-EMAIL-008")
+)
+
+// StateCoordinator interface allows IMAP client to report state events
+// without importing the coordinator package (avoiding import cycles)
+type StateCoordinator interface {
+	ReportSimpleEvent(component string, event string, connected bool, err status.BridgeStateErrorCode, metadata map[string]any)
+}
+
 // IMAPDebugWriter captures all IMAP protocol traffic for debugging
 type IMAPDebugWriter struct {
 	logger    *zerolog.Logger
@@ -125,9 +140,10 @@ type Client struct {
 	sentFolder string
 	 
  	// Bridge integration
-	login      *bridgev2.UserLogin // Can be nil for testing
-	log        *zerolog.Logger
-	processor  *email.Processor
+	login            *bridgev2.UserLogin // Can be nil for testing
+	log              *zerolog.Logger
+	processor        *email.Processor
+	stateCoordinator StateCoordinator // Interface for reporting state events
 
 	// Threading
 	mu           sync.RWMutex
@@ -231,7 +247,7 @@ func getSecureTLSConfig(serverName string) *tls.Config {
 }
 
 // NewClient creates a new IMAP client for the given email account
-func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string, backfillSeconds int, backfillMax int, initialIdleTimeoutSeconds int) (*Client, error) {
+func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string, backfillSeconds int, backfillMax int, initialIdleTimeoutSeconds int, stateCoord StateCoordinator) (*Client, error) {
 	// Auto-detect provider settings
 	domain := strings.ToLower(strings.Split(email, "@")[1])
 	provider, ok := CommonProviders[domain]
@@ -269,10 +285,11 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		Username:     username,
 		Password:     password, // Never logged
 		TLS:          useTLS,
-		login:        login,
-		log:          log,
-		sanitized:    sanitized,
-		secret:       secret,
+		login:            login,
+		log:              log,
+		sanitized:        sanitized,
+		secret:           secret,
+		stateCoordinator: stateCoord, // Can be nil for watchdog clients
 		stopIdle:     make(chan struct{}),
 		reconnect:    make(chan struct{}, 1),
 		// Reliability components - handle error from NewCircuitBreaker
@@ -437,6 +454,11 @@ func (c *Client) connectInternal() error {
 
 	c.connected = true
 	c.log.Info().Msg("Successfully connected to IMAP server")
+	
+	// Report INBOX connection success
+	if c.stateCoordinator != nil {
+		c.stateCoordinator.ReportSimpleEvent("inbox", "connection_established", true, "", nil)
+	}
 
 	return nil
 }
@@ -494,6 +516,11 @@ func (c *Client) Disconnect() error {
 
 	c.connected = false
 	c.log.Info().Msg("Disconnected from IMAP server (INBOX)")
+	
+	// Report INBOX connection closure
+	if c.stateCoordinator != nil {
+		c.stateCoordinator.ReportSimpleEvent("inbox", "connection_closed", false, "", nil)
+	}
 
 	// Close Sent connection
 	c.sentMu.Lock()
@@ -504,6 +531,10 @@ func (c *Client) Disconnect() error {
 		c.sentClient.Close()
 		c.sentClient = nil
 		c.sentConnected = false
+		// Report Sent connection closure during shutdown
+		if c.stateCoordinator != nil {
+			c.stateCoordinator.ReportSimpleEvent("sent", "connection_closed", false, "", nil)
+		}
 	}
 	c.sentMu.Unlock()
 	
@@ -645,13 +676,10 @@ func (c *Client) idleLoop() {
 			if err := c.runIDLE(); err != nil {
 				c.log.Error().Err(err).Msg("IDLE failed, attempting recovery through circuit breaker")
 				
-				// Demote bridge state for this login while we attempt recovery
-				c.sendBridgeState(status.BridgeState{
-					StateEvent: status.StateUnknownError,
-					Source:     "network", 
-					Info:       map[string]any{"component": "imap", "reason": "idle_failed"},
-					TTL:        300,
-				})
+				// Report IDLE failure for recovery
+				if c.stateCoordinator != nil {
+					c.stateCoordinator.ReportSimpleEvent("inbox", "idle_failed", false, EmailIdleFailed, map[string]any{"reason": "idle_failed", "source": "network"})
+				}
 				
 				// Use circuit breaker and retry logic instead of crude sleep
 				recoveryErr := c.performIDLERecovery()
@@ -662,8 +690,10 @@ func (c *Client) idleLoop() {
 				}
 				
 				c.log.Info().Msg("IDLE recovery successful")
-				// Promote bridge state back to connected after successful recovery
-				c.sendBridgeState(status.BridgeState{StateEvent: status.StateConnected})
+				// Report IDLE recovery success
+				if c.stateCoordinator != nil {
+					c.stateCoordinator.ReportSimpleEvent("inbox", "idle_recovered", true, "", nil)
+				}
 				continue
 			}
 		}
@@ -1546,6 +1576,11 @@ func (c *Client) ensureSentConnectionAndLoop() {
 	c.sentMu.Unlock()
 
 	c.log.Info().Str("mailbox", c.sentFolder).Msg("Started dedicated Sent mailbox connection")
+	
+	// Report Sent connection success
+	if c.stateCoordinator != nil {
+		c.stateCoordinator.ReportSimpleEvent("sent", "connection_established", true, "", nil)
+	}
 
 	// Start IDLE loop on dedicated Sent connection
 	go c.sentIdleLoop(cli, stopCh)
@@ -1577,6 +1612,10 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 			c.sentClient = nil
 		}
 		c.sentConnected = false
+		// Report Sent connection failure during IDLE loop failure
+		if c.stateCoordinator != nil {
+			c.stateCoordinator.ReportSimpleEvent("sent", "connection_lost", false, EmailSentDisconnected, nil)
+		}
 		stopChLocal := c.sentStop
 		c.sentMu.Unlock()
 		if stopChLocal != nil {
@@ -1683,6 +1722,9 @@ func (c *Client) sendBridgeState(state status.BridgeState) {
 	c.lastStateTime = now
 }
 
+// reportConnectionStatus is deprecated - replaced by state coordinator
+// Keeping as a stub to avoid breaking existing code during transition
+
 // sentHealthLoop periodically NOOPs the Sent connection and triggers a rebuild on failure.
 func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(1 * time.Minute)
@@ -1717,6 +1759,10 @@ func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 								c.sentClient.Close()
 								c.sentClient = nil
 								c.sentConnected = false
+								// Report Sent connection failure
+								if c.stateCoordinator != nil {
+									c.stateCoordinator.ReportSimpleEvent("sent", "connection_lost", false, EmailSentDisconnected, nil)
+								}
 								go c.ensureSentConnectionAndLoop()
 							}
 						}()

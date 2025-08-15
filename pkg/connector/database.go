@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -203,31 +202,6 @@ func getSalt() ([]byte, error) {
 	}
 	
 	return salt, nil
-}
-
-func parseKeyString(s string) ([]byte, error) {
-	s = strings.TrimSpace(s)
-	// base64
-	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
-		if len(b) == 32 {
-			return b, nil
-		}
-	}
-	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
-		if len(b) == 32 {
-			return b, nil
-		}
-	}
-	// hex (allow 0x prefix)
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		s = s[2:]
-	}
-	if b, err := hex.DecodeString(s); err == nil {
-		if len(b) == 32 {
-			return b, nil
-		}
-	}
-	return nil, errors.New("key must be 32 bytes in base64 or hex")
 }
 
 func encryptString(plain string) (string, error) {

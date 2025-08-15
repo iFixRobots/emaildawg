@@ -31,7 +31,7 @@ type Manager struct {
 	watchdogInterval time.Duration
 
 	// Last known state per client key to suppress duplicate state spam
-	lastState map[string]string
+	lastState map[string]status.BridgeStateEvent
 }
 
 // NewManager creates a new IMAP manager
@@ -43,7 +43,7 @@ func NewManager(bridge *bridgev2.Bridge, log *zerolog.Logger, sanitized bool, se
 		secret:   secret,
 		clients: make(map[string]*Client),
 		watchdogInterval: 60 * time.Second,
-		lastState: make(map[string]string),
+		lastState: make(map[string]status.BridgeStateEvent),
 	}
 }
 
@@ -76,7 +76,7 @@ func (m *Manager) AddAccount(login *bridgev2.UserLogin, email, username, passwor
 	logger := m.log.With().
 		Str("user", login.UserMXID.String()).
 		Str("email", email).Logger()
-client, err := NewClient(email, username, password, login, &logger, m.sanitized, m.secret, 180, 25, 3)
+client, err := NewClient(email, username, password, login, &logger, m.sanitized, m.secret, 180, 25, 3, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
@@ -223,7 +223,7 @@ return fmt.Sprintf("%s:%s", userMXID, email)
 }
 
 // sendStateIfChanged sends a bridge state for this account only if the state has changed.
-func (m *Manager) sendStateIfChanged(userMXID, email string, login *bridgev2.UserLogin, newState string, info map[string]any, ttl int) {
+func (m *Manager) sendStateIfChanged(userMXID, email string, login *bridgev2.UserLogin, newState status.BridgeStateEvent, info map[string]any, ttl int) {
 	key := m.getClientKey(userMXID, email)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -232,14 +232,15 @@ func (m *Manager) sendStateIfChanged(userMXID, email string, login *bridgev2.Use
 		return
 	}
 	m.lastState[key] = newState
-	bs := status.BridgeState{StateEvent: status.BridgeStateEvent(newState)}
+	bs := status.BridgeState{StateEvent: newState}
 	if info != nil {
 		bs.Info = info
 	}
 	if ttl > 0 {
 		bs.TTL = ttl
 	}
-	login.BridgeState.Send(bs)
+	// Disabled: State coordinator handles bridge state now
+	// login.BridgeState.Send(bs)
 }
 
 // startWatchdog launches a periodic health check for a client
@@ -265,7 +266,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 				logger.Warn().Msg("Client disconnected, attempting reconnect from watchdog")
 				// Demote bridge state for this login while attempting recovery (send only on transition)
 				if client.login != nil {
-					m.sendStateIfChanged(userMXID, email, client.login, "TRANSIENT_DISCONNECT", map[string]any{"component": "imap", "reason": "watchdog_disconnected"}, 300)
+					m.sendStateIfChanged(userMXID, email, client.login, status.StateTransientDisconnect, map[string]any{"component": "imap", "reason": "watchdog_disconnected"}, 300)
 				}
 				if recErr := client.Reconnect(); recErr != nil {
 					// Check if error indicates concurrent operation in progress
@@ -284,7 +285,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 						}
 					} else if client.login != nil {
 						// Promote back to connected when IDLE starts (send only on transition)
-						m.sendStateIfChanged(userMXID, email, client.login, "CONNECTED", nil, 0)
+						m.sendStateIfChanged(userMXID, email, client.login, status.StateConnected, nil, 0)
 					}
 				}
 				continue
@@ -293,7 +294,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 				logger.Warn().Err(err).Msg("Health probe failed, triggering reconnect")
 				// Demote while we recover (send only on transition)
 				if client.login != nil {
-					m.sendStateIfChanged(userMXID, email, client.login, "TRANSIENT_DISCONNECT", map[string]any{"component": "imap", "reason": "watchdog_probe_failed"}, 120)
+					m.sendStateIfChanged(userMXID, email, client.login, status.StateTransientDisconnect, map[string]any{"component": "imap", "reason": "watchdog_probe_failed"}, 120)
 				}
 				if recErr := client.Reconnect(); recErr != nil {
 					// Check if error indicates concurrent operation in progress
@@ -312,7 +313,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 						}
 					} else if client.login != nil {
 						// Promote to connected after successful IDLE start
-						m.sendStateIfChanged(userMXID, email, client.login, "CONNECTED", nil, 0)
+						m.sendStateIfChanged(userMXID, email, client.login, status.StateConnected, nil, 0)
 					}
 				}
 			}

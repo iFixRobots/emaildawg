@@ -13,6 +13,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
+	"github.com/iFixRobots/emaildawg/pkg/coordinator"
 	"github.com/iFixRobots/emaildawg/pkg/imap"
 )
 
@@ -30,8 +31,9 @@ type EmailClient struct {
 	IMAPClient *imap.Client
 
 	// State management
-	isConnected atomic.Bool
-	stopLoops   atomic.Pointer[context.CancelFunc]
+	stateCoordinator *coordinator.StateCoordinator
+	isConnected      atomic.Bool
+	stopLoops        atomic.Pointer[context.CancelFunc]
 
 	// Synchronization
 	historySyncMutex sync.Mutex
@@ -44,10 +46,11 @@ var (
 	_ bridgev2.NetworkAPI = (*EmailClient)(nil)
 )
 
-// EmailClientErrors
+// EmailClientErrors - Core connector-level errors
 var (
 	EmailNotLoggedIn      = status.BridgeStateErrorCode("E-EMAIL-001")
 	EmailConnectionFailed = status.BridgeStateErrorCode("E-EMAIL-002")
+	EmailAuthFailure      = status.BridgeStateErrorCode("E-EMAIL-005")
 )
 
 func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
@@ -56,6 +59,10 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		Main:      ec,
 		UserLogin: login,
 	}
+	
+	// Initialize state coordinator
+	emailClient.stateCoordinator = coordinator.NewStateCoordinator(login, &ec.Bridge.Log)
+	
 	login.Client = emailClient
 
 	// Extract login metadata with proper error handling
@@ -114,6 +121,7 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		ec.Config.Network.IMAP.StartupBackfillSeconds,
 		ec.Config.Network.IMAP.StartupBackfillMax,
 		ec.Config.Network.IMAP.InitialIdleTimeoutSeconds,
+		emailClient.stateCoordinator,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
@@ -148,58 +156,38 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 
 func (ec *EmailClient) Connect(ctx context.Context) {
 	if ec.IMAPClient == nil {
-		state := status.BridgeState{
-			StateEvent: status.BridgeStateEvent("BAD_CREDENTIALS"),
-			Error:      EmailNotLoggedIn,
-		}
-		ec.UserLogin.BridgeState.Send(state)
+		ec.stateCoordinator.ReportSimpleEvent("inbox", "auth_failure", false, EmailNotLoggedIn, nil)
 		return
 	}
 
 	// Emit STARTING before beginning connection work
-	ec.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.BridgeStateEvent("STARTING")})
+	ec.stateCoordinator.ReportSimpleEvent("inbox", "connection_started", false, "", nil)
 
 	// Connect to IMAP server
 	if err := ec.IMAPClient.Connect(); err != nil {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to connect to IMAP server")
-		state := status.BridgeState{
-			StateEvent: status.BridgeStateEvent("BRIDGE_UNREACHABLE"),
-			Error:      EmailConnectionFailed,
-			Info: map[string]any{
-				"go_error": err.Error(),
-			},
-		}
-		ec.UserLogin.BridgeState.Send(state)
+		ec.stateCoordinator.ReportSimpleEvent("inbox", "connection_lost", false, EmailConnectionFailed, map[string]any{"go_error": err.Error()})
 		return
 	}
 
-	// We’re connected to the server; emit RUNNING (service up but not yet fully ready)
-	ec.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.BridgeStateEvent("RUNNING")})
+	// We're connected to the server; emit RUNNING (service up but not yet fully ready)
+	// Note: the actual connection_established event will be reported by the IMAP client
 
 	ec.isConnected.Store(true)
 
 	// Start IMAP IDLE monitoring with retry logic (includes baseline/backfill)
 	if err := ec.startIDLEWithRetry(); err != nil {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE after retries")
-		// Set bridge state to indicate IDLE failure and do NOT mark as connected
-		state := status.BridgeState{
-			StateEvent: status.BridgeStateEvent("TRANSIENT_DISCONNECT"),
-			Error:      EmailConnectionFailed,
-			Info: map[string]any{
-				"go_error":   err.Error(),
-				"error_type": "IDLE_startup_failed",
-			},
-		}
-		ec.UserLogin.BridgeState.Send(state)
+		// Report IDLE startup failure - this will be handled by the state coordinator
+		ec.stateCoordinator.ReportSimpleEvent("inbox", "idle_failed", false, imap.EmailIdleFailed, map[string]any{"go_error": err.Error(), "error_type": "IDLE_startup_failed"})
 		return
 	}
 
 	// Start background loops now that IDLE is running and baseline/backfill are done
 	ec.startLoops()
 
-	// Send connected state only after readiness is complete
-	state := status.BridgeState{StateEvent: status.BridgeStateEvent("CONNECTED")}
-	ec.UserLogin.BridgeState.Send(state)
+	// Report successful IDLE startup - the coordinator will promote to CONNECTED
+	ec.stateCoordinator.ReportSimpleEvent("inbox", "idle_started", true, "", nil)
 
 	ec.UserLogin.Log.Info().Msg("Email client connected successfully and ready (baseline/backfill complete)")
 }
