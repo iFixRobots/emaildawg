@@ -300,6 +300,38 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 				log.Error().Err(err).Msg("Failed to create circuit breaker")
 				return nil
 			}
+			
+			// Register state change callback if state coordinator available
+			if stateCoord != nil {
+				cb.SetStateChangeCallback(func(oldState, newState reliability.CircuitBreakerState) {
+					// Convert circuit breaker states to coordinator events
+					var event string
+					var connected bool
+					var errorCode status.BridgeStateErrorCode
+					
+					switch newState {
+					case reliability.StateClosed:
+						event = "circuit_closed"
+						connected = true
+						errorCode = ""
+					case reliability.StateHalfOpen:
+						event = "circuit_half_open"
+						connected = false
+						errorCode = EmailCircuitOpen
+					case reliability.StateOpen:
+						event = "circuit_opened"
+						connected = false
+						errorCode = EmailCircuitOpen
+					}
+					
+					stateCoord.ReportSimpleEvent("circuit_breaker", event, connected, errorCode, map[string]any{
+						"old_state": oldState.String(),
+						"new_state": newState.String(),
+						"component": "circuit_breaker",
+					})
+				})
+			}
+			
 			return cb
 		}(),
 		retryConfig:    reliability.NetworkRetryConfig(),
