@@ -1208,7 +1208,7 @@ func collapseWhitespace(s string) string {
 	for _, r := range s {
 		if r == ' ' || r == '\n' || r == '\t' || r == '\r' { // whitespace
 			if !prevWS {
-				b.WriteByte(' ')
+				b.WriteRune(' ')
 				prevWS = true
 			}
 			continue
