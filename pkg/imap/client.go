@@ -1155,10 +1155,11 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 	}
 
 	// Also fetch headers, text content, and the full raw body so MIME parts (HTML/attachments) are available
+	// Use Peek: true to avoid marking messages as read (\Seen flag)
 	fetchOptions.BodySection = []*imap.FetchItemBodySection{
-		{Specifier: imap.PartSpecifierHeader},
-		{Specifier: imap.PartSpecifierText},
-		{Specifier: imap.PartSpecifierNone}, // full message body
+		{Specifier: imap.PartSpecifierHeader, Peek: true},
+		{Specifier: imap.PartSpecifierText, Peek: true},
+		{Specifier: imap.PartSpecifierNone, Peek: true}, // full message body
 	}
 
 	// Create UID set and execute fetch command
@@ -1187,16 +1188,16 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 				c.log.Warn().Uint32("uid", uint32(uid)).Str("mailbox", mailbox).Msg("Degraded parse detected, retrying fetch once")
 				// brief delay to allow server to settle
 				time.Sleep(200 * time.Millisecond)
-				// Re-fetch
+				// Re-fetch with Peek: true to avoid marking as read
 				refetchOpts := &imap.FetchOptions{
 					Envelope:      true,
 					BodyStructure: &imap.FetchItemBodyStructure{},
 					Flags:         true,
 					UID:           true,
 					BodySection: []*imap.FetchItemBodySection{
-						{Specifier: imap.PartSpecifierHeader},
-						{Specifier: imap.PartSpecifierText},
-						{Specifier: imap.PartSpecifierNone},
+						{Specifier: imap.PartSpecifierHeader, Peek: true},
+						{Specifier: imap.PartSpecifierText, Peek: true},
+						{Specifier: imap.PartSpecifierNone, Peek: true},
 					},
 				}
 				refetch := cli.Fetch(imap.UIDSetNum(uid), refetchOpts)
