@@ -933,8 +933,14 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 		content.FormattedBody = origHTML
 	}
 
-	// Ensure body isn't empty
-	if content.Body == "" {
+	// Ensure body isn't empty - if we have HTML but no text, try to extract from HTML
+	if content.Body == "" && origHTML != "" {
+		content.Body = simpleHTMLToText(origHTML)
+		// If HTML extraction still produces nothing meaningful, use fallback
+		if strings.TrimSpace(content.Body) == "" {
+			content.Body = "[Email content is HTML-only - check formatted version]"
+		}
+	} else if content.Body == "" {
 		content.Body = "[No text content]"
 	}
 
