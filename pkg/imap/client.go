@@ -123,7 +123,7 @@ type Client struct {
 	// SENT IMAP client (second TCP connection)
 	sentClient       *imapclient.Client
 	sentConnected    bool
-	sentIdling       bool // reserved for possible future IDLE on Sent
+	sentIdling       bool // tracks if Sent Mail IDLE loop is running
 	sentStop         chan struct{}
 	sentMu           sync.RWMutex
 	sentFailureCount int
