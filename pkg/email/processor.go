@@ -755,13 +755,7 @@ func (e *EmailMatrixEvent) GetTimestamp() time.Time {
 }
 
 func (e *EmailMatrixEvent) GetSender() bridgev2.EventSender {
-	if e.emailMessage.IsOutbound {
-		// Always send as the user's Matrix account when the message is from Sent mailbox.
-		// The bridge will use the per-user intent (double puppet) when available.
-		return bridgev2.EventSender{IsFromMe: true}
-	}
-	
-	// Create ghost sender for the email sender
+	// Create ghost sender for ALL messages (both inbound and outbound)
 	fromEmail := extractEmailAddress(e.emailMessage.From)
 	if strings.TrimSpace(fromEmail) == "" {
 		// Fallback to a deterministic placeholder rather than letting the bridge default to bot
@@ -775,6 +769,14 @@ func (e *EmailMatrixEvent) GetSender() bridgev2.EventSender {
 		}
 	}
 	ghostID := common.EmailToGhostID(fromEmail)
+	
+	if e.emailMessage.IsOutbound {
+		// For outbound messages: set both IsFromMe=true (for Matrix attribution) 
+		// AND Sender=ghostID (for database storage and thread resolution)
+		return bridgev2.EventSender{Sender: ghostID, IsFromMe: true}
+	}
+	
+	// For inbound messages: only ghost sender
 	return bridgev2.EventSender{Sender: ghostID}
 }
 
