@@ -222,26 +222,7 @@ func (m *Manager) getClientKey(userMXID, email string) string {
 return fmt.Sprintf("%s:%s", userMXID, email)
 }
 
-// sendStateIfChanged sends a bridge state for this account only if the state has changed.
-func (m *Manager) sendStateIfChanged(userMXID, email string, login *bridgev2.UserLogin, newState status.BridgeStateEvent, info map[string]any, ttl int) {
-	key := m.getClientKey(userMXID, email)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	last := m.lastState[key]
-	if last == newState {
-		return
-	}
-	m.lastState[key] = newState
-	bs := status.BridgeState{StateEvent: newState}
-	if info != nil {
-		bs.Info = info
-	}
-	if ttl > 0 {
-		bs.TTL = ttl
-	}
-	// Disabled: State coordinator handles bridge state now
-	// login.BridgeState.Send(bs)
-}
+// Legacy function removed - state coordinator handles bridge state now
 
 // startWatchdog launches a periodic health check for a client
 func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
@@ -266,7 +247,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 				logger.Warn().Msg("Client disconnected, attempting reconnect from watchdog")
 				// Demote bridge state for this login while attempting recovery (send only on transition)
 				if client.login != nil {
-					m.sendStateIfChanged(userMXID, email, client.login, status.StateTransientDisconnect, map[string]any{"component": "imap", "reason": "watchdog_disconnected"}, 300)
+					// State coordinator handles bridge state now
 				}
 				if recErr := client.Reconnect(); recErr != nil {
 					// Check if error indicates concurrent operation in progress
@@ -284,8 +265,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 							logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
 						}
 					} else if client.login != nil {
-						// Promote back to connected when IDLE starts (send only on transition)
-						m.sendStateIfChanged(userMXID, email, client.login, status.StateConnected, nil, 0)
+						// State coordinator handles bridge state now
 					}
 				}
 				continue
@@ -294,7 +274,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 				logger.Warn().Err(err).Msg("Health probe failed, triggering reconnect")
 				// Demote while we recover (send only on transition)
 				if client.login != nil {
-					m.sendStateIfChanged(userMXID, email, client.login, status.StateTransientDisconnect, map[string]any{"component": "imap", "reason": "watchdog_probe_failed"}, 120)
+					// State coordinator handles bridge state now
 				}
 				if recErr := client.Reconnect(); recErr != nil {
 					// Check if error indicates concurrent operation in progress
@@ -313,7 +293,7 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 						}
 					} else if client.login != nil {
 						// Promote to connected after successful IDLE start
-						m.sendStateIfChanged(userMXID, email, client.login, status.StateConnected, nil, 0)
+						// State coordinator handles bridge state now
 					}
 				}
 			}

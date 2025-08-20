@@ -1743,29 +1743,6 @@ func (c *Client) triggerReconnect() {
 	}
 }
 
-// sendBridgeState wraps BridgeState.Send with a small duplicate throttling window
-// to avoid spamming identical state/error pairs during brief flaps. It only
-// suppresses if both StateEvent and Error match the last sent and the last send
-// was within 60 seconds. Otherwise, it forwards to the framework.
-func (c *Client) sendBridgeState(state status.BridgeState) {
-	if c.login == nil {
-		return
-	}
-	const cooldown = 60 * time.Second
-	now := time.Now()
-	if state.StateEvent == c.lastStateEvent && state.Error == c.lastStateError && now.Sub(c.lastStateTime) < cooldown {
-		c.log.Debug().
-			Str("bridge_state", string(state.StateEvent)).
-			Str("error", string(state.Error)).
-			Dur("since_last", now.Sub(c.lastStateTime)).
-			Msg("Throttling duplicate bridge state")
-		return
-	}
-	c.login.BridgeState.Send(state)
-	c.lastStateEvent = state.StateEvent
-	c.lastStateError = state.Error
-	c.lastStateTime = now
-}
 
 // reportConnectionStatus is deprecated - replaced by state coordinator
 // Keeping as a stub to avoid breaking existing code during transition
