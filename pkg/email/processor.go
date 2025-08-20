@@ -504,9 +504,13 @@ mr := multipart.NewReader(body, boundary)
 		}
 
 		// Skip multipart container parts: recurse to find real parts
+		// BUT: Don't recurse into quoted/forwarded content to avoid extracting old thread attachments
 		if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
 			childBoundary := params["boundary"]
-			attachments = append(attachments, p.parseMultipartAttachments(bytes.NewReader(dataBytes), childBoundary)...)
+			// Only recurse if this looks like current message structure, not quoted content
+			if !p.isQuotedContent(dataBytes) {
+				attachments = append(attachments, p.parseMultipartAttachments(bytes.NewReader(dataBytes), childBoundary)...)
+			}
 			continue
 		}
 
@@ -622,6 +626,50 @@ func detectBoundary(data []byte) string {
 		}
 	}
 	return ""
+}
+
+// isQuotedContent tries to detect if a multipart section contains quoted/forwarded content
+// rather than current message content, to avoid extracting attachments from email thread history
+func (p *Processor) isQuotedContent(dataBytes []byte) bool {
+	// Check various indicators that this is quoted/forwarded content
+	
+	// 1. Look for common forwarded message headers within the content
+	dataStr := string(dataBytes)
+	lowerData := strings.ToLower(dataStr)
+	
+	// Common forwarded message markers
+	forwardMarkers := []string{
+		"-----original message-----",
+		"begin forwarded message",
+		"forwarded message",
+		"---------- forwarded message ----------",
+		"from:", // Often appears at start of quoted content
+	}
+	
+	for _, marker := range forwardMarkers {
+		if strings.Contains(lowerData, marker) {
+			return true
+		}
+	}
+	
+	// 2. Check for reply indicators with Message-ID patterns
+	// These often indicate we're looking at a nested/quoted email
+	if strings.Contains(lowerData, "message-id:") && 
+	   (strings.Contains(lowerData, "date:") || strings.Contains(lowerData, "subject:")) {
+		return true
+	}
+	
+	// 3. Check content length - very large multipart sections in replies
+	// are often the entire quoted thread history
+	if len(dataBytes) > 100*1024 { // 100KB threshold
+		// Large content with multiple boundaries is likely quoted thread
+		boundaryCount := strings.Count(lowerData, "boundary=")
+		if boundaryCount > 2 {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // formatIMAPAddress converts an IMAP address to string format
