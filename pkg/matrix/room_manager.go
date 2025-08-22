@@ -127,8 +127,8 @@ func BuildReadOnlyPowerLevels() *bridgev2.PowerLevelOverrides {
 			event.StateRoomName:   101,
 			event.StateTopic:      101,
 			event.StateRoomAvatar: 101,
-			// Allow ghosts to send messages at default PL 0 so messages appear from the email sender
-			event.EventMessage:    0,
+			// Block all users from sending messages - bridge framework handles ghost sending
+			event.EventMessage:    101,
 			// Keep reactions/redactions restricted to prevent Matrix-side edits by default
 			event.EventReaction:   101,
 			event.EventRedaction:  101,
