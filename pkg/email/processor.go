@@ -882,18 +882,10 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 				nextIndex++
 				return fmt.Sprintf("[Image %d: %s]", meta.Index, meta.Label)
 			}
-			// Remote images: never fetch
+			// Remote images: never fetch, remove placeholders entirely to reduce clutter
 			if strings.HasPrefix(low, "http:") || strings.HasPrefix(low, "https:") {
-				// Show concise host/path
-				placeholder := "[Remote image]"
-				// Try to include host
-				if u := src; u != "" {
-					// crude host extraction
-					if i := strings.Index(u, "://"); i >= 0 { u = u[i+3:] }
-					if i := strings.Index(u, "/"); i > 0 { u = u[:i] }
-					if u != "" { placeholder = fmt.Sprintf("[Remote image: %s]", u) }
-				}
-				return placeholder
+				// Remove remote images entirely - they're usually tracking/marketing content
+				return ""
 			}
 			// Data URIs should have been externalized to mxc already. If src is mxc, try to match a data meta.
 			if strings.HasPrefix(low, "mxc://") {
