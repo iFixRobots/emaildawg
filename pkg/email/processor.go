@@ -30,6 +30,21 @@ import (
 	"github.com/iFixRobots/emaildawg/pkg/common"
 )
 
+// Matrix content size limits and thresholds
+const (
+	// MaxMatrixContentSize is the conservative limit for Matrix events (48 KiB)
+	// Matrix rejects events > 64 KiB after encryption, so we use a conservative cap
+	MaxMatrixContentSize = 48 * 1024
+	
+	// HTMLMinificationTarget is the target size for HTML minification (24 KiB)
+	// Conservative target to account for encryption overhead
+	HTMLMinificationTarget = 24 * 1024
+	
+	// PerEventTarget is the conservative per-event target for chunked content (16 KiB)
+	// Use conservative target to account for encryption overhead
+	PerEventTarget = 16 * 1024
+)
+
 // Processor handles the complete email processing pipeline
 type Processor struct {
 	log           *zerolog.Logger
@@ -986,18 +1001,14 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 		content.Body = "[No text content]"
 	}
 
-	// Absolute safety limit below Matrix's 64 KiB content cap, with extra margin for encryption overhead
-	// Matrix rejects events > 64 KiB after encryption. Use a conservative cap.
-	const hardLimit = 48 * 1024
-
 	// Step 1: If we have HTML, try to keep it by minifying when necessary
-	if !withinMatrixLimit(content, hardLimit) && content.FormattedBody != "" {
+	if !withinMatrixLimit(content, MaxMatrixContentSize) && content.FormattedBody != "" {
 		// Try bounded minification (more conservative target to account for encryption overhead)
-		if minified, ok := boundedMinifyHTML(content.FormattedBody, 24*1024); ok {
+		if minified, ok := boundedMinifyHTML(content.FormattedBody, HTMLMinificationTarget); ok {
 			content.FormattedBody = minified
 		}
 			// If still too big, drop HTML but preserve as attachment
-			if !withinMatrixLimit(content, hardLimit) {
+			if !withinMatrixLimit(content, MaxMatrixContentSize) {
 				content.FormattedBody = ""
 				// Add a small notice in the body.
 				if content.Body != "" {
@@ -1046,10 +1057,10 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 	}
 
 	// Step 2: If still too large (plain text is huge), truncate body and attach full text.
-	if !withinMatrixLimit(content, hardLimit) {
+	if !withinMatrixLimit(content, MaxMatrixContentSize) {
 		fullText := content.Body
 		// Aim to leave headroom for wrapper keys etc.
-		maxBody := hardLimit - 2048
+		maxBody := MaxMatrixContentSize - 2048
 		if maxBody < 1024 {
 			maxBody = 1024
 		}
@@ -1094,7 +1105,7 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 	}
 
 	// After adjustments, if somehow still too big, drop formatted_body to be extra safe
-	if content.FormattedBody != "" && !withinMatrixLimit(content, hardLimit) {
+	if content.FormattedBody != "" && !withinMatrixLimit(content, MaxMatrixContentSize) {
 		content.FormattedBody = ""
 	}
 
@@ -1107,9 +1118,7 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 	}
 
 	// Add the main message part(s), chunking if necessary to stay well below server limits.
-	// Use a conservative per-event target to account for encryption overhead.
-	const perEventTarget = 16 * 1024
-	if withinMatrixLimit(content, hardLimit) && len(content.Body) <= perEventTarget {
+	if withinMatrixLimit(content, MaxMatrixContentSize) && len(content.Body) <= PerEventTarget {
 		appendPart("body", content)
 	} else {
 		// Split the body into multiple UTF-8 safe chunks.
@@ -1118,16 +1127,16 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 		for len(remaining) > 0 {
 			pid := fmt.Sprintf("body-chunk-%d", chunkIndex)
 			// Try to cut a chunk that fits comfortably under the target
-			chunk, _ := truncateUTF8PreserveWords(remaining, perEventTarget)
+			chunk, _ := truncateUTF8PreserveWords(remaining, PerEventTarget)
 			if chunk == "" {
 				// Fallback to raw slice to make progress
-				cut := perEventTarget
+				cut := PerEventTarget
 				if cut > len(remaining) { cut = len(remaining) }
 				chunk = remaining[:cut]
 			}
 			chunkContent := &event.MessageEventContent{MsgType: event.MsgText, Body: chunk}
 			// Make extra sure this chunk fits JSON limit
-			for !withinMatrixLimit(chunkContent, hardLimit) && len(chunk) > 0 {
+			for !withinMatrixLimit(chunkContent, MaxMatrixContentSize) && len(chunk) > 0 {
 				// Reduce chunk size by 10%
 				reduceBy := len(chunk) / 10
 				if reduceBy < 256 { reduceBy = 256 }

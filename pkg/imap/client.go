@@ -16,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/status"
 
+	"github.com/iFixRobots/emaildawg/pkg/coordinator"
 	"github.com/iFixRobots/emaildawg/pkg/email"
 	logging "github.com/iFixRobots/emaildawg/pkg/logging"
 	"github.com/iFixRobots/emaildawg/pkg/reliability"
@@ -311,15 +312,15 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 					
 					switch newState {
 					case reliability.StateClosed:
-						event = "circuit_closed"
+						event = string(coordinator.EventCircuitClosed)
 						connected = true
 						errorCode = ""
 					case reliability.StateHalfOpen:
-						event = "circuit_half_open"
+						event = string(coordinator.EventCircuitHalfOpen)
 						connected = false
 						errorCode = EmailCircuitOpen
 					case reliability.StateOpen:
-						event = "circuit_opened"
+						event = string(coordinator.EventCircuitOpened)
 						connected = false
 						errorCode = EmailCircuitOpen
 					}
@@ -490,7 +491,7 @@ func (c *Client) connectInternal() error {
 	
 	// Report INBOX connection success
 	if c.stateCoordinator != nil {
-		c.stateCoordinator.ReportSimpleEvent("inbox", "connection_established", true, "", nil)
+		c.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventConnectionEstablished), true, "", nil)
 	}
 
 	return nil
@@ -711,7 +712,7 @@ func (c *Client) idleLoop() {
 				
 				// Report IDLE failure for recovery
 				if c.stateCoordinator != nil {
-					c.stateCoordinator.ReportSimpleEvent("inbox", "idle_failed", false, EmailIdleFailed, map[string]any{"reason": "idle_failed", "source": "network"})
+					c.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventIdleFailed), false, EmailIdleFailed, map[string]any{"reason": "idle_failed", "source": "network"})
 				}
 				
 				// Use circuit breaker and retry logic instead of crude sleep
@@ -725,7 +726,7 @@ func (c *Client) idleLoop() {
 				c.log.Info().Msg("IDLE recovery successful")
 				// Report IDLE recovery success
 				if c.stateCoordinator != nil {
-					c.stateCoordinator.ReportSimpleEvent("inbox", "idle_recovered", true, "", nil)
+					c.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventIdleRecovered), true, "", nil)
 				}
 				continue
 			}
@@ -1624,7 +1625,7 @@ func (c *Client) ensureSentConnectionAndLoop() {
 	
 	// Report Sent connection success
 	if c.stateCoordinator != nil {
-		c.stateCoordinator.ReportSimpleEvent("sent", "connection_established", true, "", nil)
+		c.stateCoordinator.ReportSimpleEvent("sent", string(coordinator.EventConnectionEstablished), true, "", nil)
 	}
 
 	// Start IDLE loop on dedicated Sent connection

@@ -179,7 +179,7 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 	if err := ec.startIDLEWithRetry(); err != nil {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE after retries")
 		// Report IDLE startup failure - this will be handled by the state coordinator
-		ec.stateCoordinator.ReportSimpleEvent("inbox", "idle_failed", false, imap.EmailIdleFailed, map[string]any{"go_error": err.Error(), "error_type": "IDLE_startup_failed"})
+		ec.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventIdleFailed), false, imap.EmailIdleFailed, map[string]any{"go_error": err.Error(), "error_type": "IDLE_startup_failed"})
 		return
 	}
 
