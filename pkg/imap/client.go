@@ -3,6 +3,7 @@ package imap
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -462,7 +463,7 @@ func (c *Client) connectInternal() error {
 	case err := <-loginErr:
 		if err != nil {
 			// Handle timeout specifically 
-			if err == context.DeadlineExceeded {
+			if errors.Is(err, context.DeadlineExceeded) {
 				c.log.Error().Msg("IMAP authentication timed out")
 				conn.Close()
 				return fmt.Errorf("IMAP login timed out after %v", c.timeoutConfig.Command)
@@ -1163,7 +1164,6 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 	// Create UID set and execute fetch command
 	uidSet := imap.UIDSetNum(uid)
 	fetchCmd := cli.Fetch(uidSet, fetchOptions)
-	defer fetchCmd.Close()
 
 	// Process the fetched message
 	for {
@@ -1481,7 +1481,7 @@ func (c *Client) TestConnection() error {
 	case err := <-noopErr:
 		if err != nil {
 			// Handle timeout specifically
-			if err == context.DeadlineExceeded {
+			if errors.Is(err, context.DeadlineExceeded) {
 				return fmt.Errorf("NOOP command timed out after %v", c.timeoutConfig.Command)
 			}
 			

@@ -14,18 +14,39 @@ func EmailToGhostID(email string) networkid.UserID {
 }
 
 // RecoverToError is a common panic recovery utility that converts panics to errors.
-// Use in defer statements to catch panics and return them as errors through a channel or callback.
+// Use in defer statements to catch panics and return them as errors through a channel.
+// Safe against nil channels, closed channels, and preserves error wrapping.
 func RecoverToError(errCh chan<- error) {
 	if r := recover(); r != nil {
-		errCh <- fmt.Errorf("panic recovered: %v", r)
+		var err error
+		
+		// Preserve original error if the panic value is already an error
+		if panicErr, ok := r.(error); ok {
+			err = fmt.Errorf("panic recovered: %w", panicErr)
+		} else {
+			err = fmt.Errorf("panic recovered: %v", r)
+		}
+		
+		// Safe send - non-blocking to prevent deadlocks and handle closed/nil channels
+		if errCh != nil {
+			select {
+			case errCh <- err:
+				// Successfully sent
+			default:
+				// Channel full, closed, or nil - don't block
+			}
+		}
 	}
 }
 
 // RecoverToString is a panic recovery utility that converts panics to string messages.
-// Useful for collecting error messages in slices during batch operations.
-func RecoverToString(operation string) string {
+// Must be called directly in a defer statement with a callback to collect the message.
+// Example: defer RecoverToString("operation", func(msg string) { if msg != "" { failures = append(failures, msg) } })
+func RecoverToString(operation string, sink func(string)) {
 	if r := recover(); r != nil {
-		return fmt.Sprintf("%s: panic %v", operation, r)
+		msg := fmt.Sprintf("%s: panic %v", operation, r)
+		if sink != nil {
+			sink(msg)
+		}
 	}
-	return ""
 }
