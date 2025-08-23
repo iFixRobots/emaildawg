@@ -2,6 +2,19 @@
 imap:
     # Default timeout for IMAP connections (in seconds)
     default_timeout: 30
+    # How far back to fetch emails at startup (in seconds, 180 = 3 minutes)
+    startup_backfill_seconds: 180
+    # Maximum number of emails to fetch during startup backfill
+    startup_backfill_max: 25
+    # Initial IDLE timeout in seconds before reconnection
+    initial_idle_timeout_seconds: 3
+
+# Logging configuration
+logging:
+    # Sanitize PII from logs (recommended for production)
+    sanitized: true
+    # Secret for generating consistent pseudonyms (leave empty for random)
+    pseudonym_secret: ""
 
 # Email processing options
 email_processing:
