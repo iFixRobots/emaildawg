@@ -16,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/status"
 
+	"github.com/iFixRobots/emaildawg/pkg/common"
 	"github.com/iFixRobots/emaildawg/pkg/coordinator"
 	"github.com/iFixRobots/emaildawg/pkg/email"
 	logging "github.com/iFixRobots/emaildawg/pkg/logging"
@@ -438,11 +439,7 @@ func (c *Client) connectInternal() error {
 	
 	loginErr := make(chan error, 1)
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				loginErr <- fmt.Errorf("panic in login command: %v", r)
-			}
-		}()
+		defer common.RecoverToError(loginErr)
 		
 		// Execute login with context awareness
 		cmd := c.client.Login(c.Username, c.Password)
@@ -1458,11 +1455,7 @@ func (c *Client) TestConnection() error {
 	
 	noopErr := make(chan error, 1)
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				noopErr <- fmt.Errorf("panic in NOOP command: %v", r)
-			}
-		}()
+		defer common.RecoverToError(noopErr)
 		
 		// Execute NOOP with context awareness
 		cmd := client.Noop()

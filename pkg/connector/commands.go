@@ -348,8 +348,8 @@ func fnLogout(ce *commands.Event) {
 			// Use a simple panic recovery to catch any logout failures
 			func() {
 				defer func() {
-					if r := recover(); r != nil {
-						failures = append(failures, fmt.Sprintf("LogoutRemote for %s: panic %v", client.Email, r))
+					if msg := recover(); msg != nil {
+						failures = append(failures, fmt.Sprintf("LogoutRemote for %s: panic %v", client.Email, msg))
 					}
 				}()
 				try()
