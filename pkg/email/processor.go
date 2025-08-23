@@ -45,6 +45,12 @@ const (
 	PerEventTarget = 16 * 1024
 )
 
+// Pre-compiled regex patterns for performance
+var (
+	reImgCidSrc = regexp.MustCompile(`(?i)(src\s*=\s*)(['"])\s*cid:([^'"\s)]+)`)
+	reCSSCidURL = regexp.MustCompile(`(?i)url\(\s*cid:([^) \t\r\n]+)\s*\)`)
+)
+
 // Processor handles the complete email processing pipeline
 type Processor struct {
 	log           *zerolog.Logger
@@ -1575,11 +1581,9 @@ metas = append(metas, &InlineImageMeta{Label: name, MXC: mxc, Mime: mimeType, Si
 // rewriteHTMLInline replaces cid: and content-location references with mxc urls
 func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[string]string) string {
 	out := html
-	// Replace cid: in img src and preserve the original quoting
-	reImg, err := regexp.Compile(`(?i)(src\s*=\s*)(['"])\s*cid:([^'"\s)]+)`) 
-	if err == nil {
-		out = reImg.ReplaceAllStringFunc(out, func(m string) string {
-			subs := reImg.FindStringSubmatch(m)
+	// Replace cid: in img src and preserve the original quoting using pre-compiled regex
+	out = reImgCidSrc.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reImgCidSrc.FindStringSubmatch(m)
 			if len(subs) > 3 {
 				attr := subs[1]   // src=
 				quote := subs[2]  // ' or "
@@ -1591,12 +1595,10 @@ func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[str
 			}
 			return m
 		})
-	}
-	// Replace CSS url(cid:...)
-	reCSS, err := regexp.Compile(`(?i)url\(\s*cid:([^) \t\r\n]+)\s*\)`) 
-	if err == nil {
-		out = reCSS.ReplaceAllStringFunc(out, func(m string) string {
-			subs := reCSS.FindStringSubmatch(m)
+	
+	// Replace CSS url(cid:...) using pre-compiled regex
+	out = reCSSCidURL.ReplaceAllStringFunc(out, func(m string) string {
+		subs := reCSSCidURL.FindStringSubmatch(m)
 			if len(subs) > 1 {
 				cid := normalizeCIDRef(subs[1])
 				if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
@@ -1605,7 +1607,6 @@ func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[str
 			}
 			return m
 		})
-	}
 	// Replace content-location src references
 	reLoc, err := regexp.Compile(`(?i)src\s*=\s*(['\"])([^'\"]+)(['\"])`)
 	if err == nil {

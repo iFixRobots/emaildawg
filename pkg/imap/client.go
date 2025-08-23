@@ -121,6 +121,7 @@ type Client struct {
 	connected  bool
 	idling     bool
 	stopIdle   chan struct{}
+	stopIdleOnce sync.Once  // Ensures stopIdle is closed only once
 	reconnect  chan struct{}
 	
 	// SENT IMAP client (second TCP connection)
@@ -294,6 +295,7 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		secret:           secret,
 		stateCoordinator: stateCoord, // Can be nil for watchdog clients
 		stopIdle:     make(chan struct{}),
+		stopIdleOnce: sync.Once{},
 		reconnect:    make(chan struct{}, 1),
 		// Reliability components - handle error from NewCircuitBreaker
 		circuitBreaker: func() *reliability.CircuitBreaker {
@@ -589,6 +591,7 @@ func (c *Client) StartIDLE() (err error) {
 	
 	// Create a fresh stop channel for this IDLE session
 	c.stopIdle = make(chan struct{})
+	c.stopIdleOnce = sync.Once{} // Reset the Once so the new channel can be closed
 	c.idling = true
 	// Keep mutex locked until critical setup is complete
 	defer func() {
@@ -658,13 +661,10 @@ func (c *Client) StopIDLE() {
 
 	c.log.Info().Msg("Stopping IMAP IDLE monitoring")
 	
-	// Safely close channel only if not already closed
-	select {
-	case <-c.stopIdle:
-		// Already closed
-	default:
+	// Safely close channel only once using sync.Once
+	c.stopIdleOnce.Do(func() {
 		close(c.stopIdle)
-	}
+	})
 	
 	// Do NOT recreate stopIdle here to avoid losing the stop signal in the running goroutine
 	c.idling = false

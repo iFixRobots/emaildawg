@@ -17,107 +17,13 @@ var (
 	HelpSectionAuth  = commands.HelpSection{Name: "Authentication", Order: 10}
 	HelpSectionInfo  = commands.HelpSection{Name: "Information", Order: 5}
 	HelpSectionAdmin = commands.HelpSection{Name: "Administration", Order: 15}
-
-	CommandPing = &commands.FullHandler{
-		Func: fnPing,
-		Name: "ping",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionInfo,
-			Description: "Check if the bridge is alive",
-		},
-	}
-
-	CommandStatus = &commands.FullHandler{
-		Func: fnStatus,
-		Name: "status",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionInfo,
-			Description: "Show bridge and connection status including health, sync status, and recent activity",
-		},
-	}
-
-	CommandLogin = &commands.FullHandler{
-		Func: fnLogin,
-		Name: "login",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAuth,
-			Description: "Connect to an email account using interactive login",
-			Args:        "",
-		},
-	}
-
-	CommandLogout = &commands.FullHandler{
-		Func: fnLogout,
-		Name: "logout",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAuth,
-			Description: "Disconnect from a specific email account or all accounts",
-			Args:        "[<email address>]",
-		},
-		RequiresLogin: true,
-	}
-
-	CommandList = &commands.FullHandler{
-		Func: fnList,
-		Name: "list",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAuth,
-			Description: "List connected email accounts",
-		},
-		RequiresLogin: true,
-	}
-
-	CommandSync = &commands.FullHandler{
-		Func: fnSync,
-		Name: "sync",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAdmin,
-			Description: "Force sync emails from server",
-			Args:        "[account]",
-		},
-		RequiresLogin: true,
-	}
-
-	CommandReconnect = &commands.FullHandler{
-		Func: fnReconnect,
-		Name: "reconnect",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAdmin,
-			Description: "Reconnect to IMAP server for a specific account",
-			Args:        "[\u003cemail address\u003e]",
-		},
-		RequiresLogin: true,
-	}
-
-	// Destructive: Deletes the bridge database immediately. Intended for homeserver-driven deletions.
-	CommandNuke = &commands.FullHandler{
-		Func: fnNuke,
-		Name: "nuke",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAdmin,
-			Description: "Delete all bridge state (database). Requires explicit confirmation: !email nuke confirm",
-			Args:        "[confirm]",
-		},
-		RequiresLogin: false,
-	}
-
-	CommandPassphrase = &commands.FullHandler{
-		Func: fnPassphrase,
-		Name: "passphrase",
-		Help: commands.HelpMeta{
-			Section:     HelpSectionAuth,
-			Description: "Manage encryption passphrase: generate, show-location, or set new passphrase",
-			Args:        "[generate|show-location|set <passphrase>]",
-		},
-		RequiresLogin: false,
-	}
 )
 
 func fnPing(ce *commands.Event) {
 	ce.Reply("🏓 **Pong!** The EmailDawg bridge is alive and running.")
 }
 
-func fnStatus(ce *commands.Event) {
+func fnStatus(ce *commands.Event, connector *EmailConnector) {
 	logins := ce.User.GetUserLogins()
 
 	if len(logins) == 0 {
@@ -134,12 +40,12 @@ func fnStatus(ce *commands.Event) {
 	}
 
 	// Get real account status from IMAP manager
-	if ConnectorInstance == nil || ConnectorInstance.IMAPManager == nil {
+	if connector == nil || connector.IMAPManager == nil {
 		ce.Reply("⚠️ **Bridge Error:** IMAP manager not initialized")
 		return
 	}
 
-	accountStatuses := ConnectorInstance.IMAPManager.GetAccountStatus(ce.User.MXID.String())
+	accountStatuses := connector.IMAPManager.GetAccountStatus(ce.User.MXID.String())
 
 	if len(accountStatuses) == 0 {
 		ce.Reply(`
@@ -209,19 +115,19 @@ func fnStatus(ce *commands.Event) {
 
 // fnNuke deletes the bridge database files immediately.
 // This is intended to be called by the homeserver/bridge bot during bridge removal.
-func fnNuke(ce *commands.Event) {
+func fnNuke(ce *commands.Event, connector *EmailConnector) {
 	// Require explicit confirmation to avoid accidental data loss
 	if len(ce.Args) == 0 || strings.ToLower(ce.Args[0]) != "confirm" {
 		ce.Reply("⚠️ This will DELETE the bridge database files and cannot be undone.\nConfirm with: `!email nuke confirm`.")
 		return
 	}
-	if ConnectorInstance == nil {
+	if connector == nil {
 		ce.Reply("⚠️ Bridge not initialized.")
 		return
 	}
 	// Stop IMAP to release DB handles
-	if ConnectorInstance.IMAPManager != nil {
-		ConnectorInstance.IMAPManager.StopAll()
+	if connector.IMAPManager != nil {
+		connector.IMAPManager.StopAll()
 	}
 	// Try common DB file locations based on defaults and documentation
 	candidates := []string{
@@ -248,7 +154,7 @@ func fnNuke(ce *commands.Event) {
 	ce.Reply("🧨 Bridge database deleted (%d file(s)). Please restart the bridge service.", removed)
 }
 
-func fnLogin(ce *commands.Event) {
+func fnLogin(ce *commands.Event, connector *EmailConnector) {
 	// Check if user has any active logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) > 0 {
@@ -269,7 +175,7 @@ func fnLogin(ce *commands.Event) {
 		}
 
 		// Process the text-based login
-		err = processTextLogin(ctx, ce, email, password)
+		err = processTextLogin(ctx, ce, email, password, connector)
 		if err != nil {
 			ce.Reply("❌ Login failed: %s", err.Error())
 		}
@@ -277,7 +183,7 @@ func fnLogin(ce *commands.Event) {
 	}
 
 	// Fallback to interactive login process using bridgev2 forms
-	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
+	loginProcess, err := connector.CreateLogin(ctx, ce.User, "email-password")
 	if err != nil {
 		ce.Reply("❌ Failed to start login process: %s", err.Error())
 		return
@@ -294,7 +200,7 @@ func fnLogin(ce *commands.Event) {
 	ce.Reply(buildEnhancedLoginInstructions(step.Instructions))
 }
 
-func fnLogout(ce *commands.Event) {
+func fnLogout(ce *commands.Event, connector *EmailConnector) {
 	// Check if user has any active logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -367,7 +273,7 @@ func fnLogout(ce *commands.Event) {
 	}
 }
 
-func fnList(ce *commands.Event) {
+func fnList(ce *commands.Event, connector *EmailConnector) {
 	// Check if user has any active logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -386,7 +292,7 @@ Need help? Use ` + "`!email help`" + ` for more information.
 
 	// Get real account list from database (without passwords for performance)
 	ctx := context.Background()
-	accounts, err := ConnectorInstance.DB.GetUserAccountsBasic(ctx, ce.User.MXID.String())
+	accounts, err := connector.DB.GetUserAccountsBasic(ctx, ce.User.MXID.String())
 	if err != nil {
 		ce.Reply("❌ Failed to get account list: %s", err.Error())
 		return
@@ -399,7 +305,7 @@ Need help? Use ` + "`!email help`" + ` for more information.
 
 	// Get account status from IMAP manager
 	statusMap := make(map[string]imap.AccountStatus)
-	statuses := ConnectorInstance.IMAPManager.GetAccountStatus(ce.User.MXID.String())
+	statuses := connector.IMAPManager.GetAccountStatus(ce.User.MXID.String())
 	for _, status := range statuses {
 		statusMap[status.Email] = status
 	}
@@ -449,7 +355,7 @@ Need help? Use ` + "`!email help`" + ` for more information.
 	ce.Reply(response)
 }
 
-func fnSync(ce *commands.Event) {
+func fnSync(ce *commands.Event, connector *EmailConnector) {
 	// Get user's logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -537,7 +443,7 @@ func fnSync(ce *commands.Event) {
 	ce.Reply(result.String())
 }
 
-func fnReconnect(ce *commands.Event) {
+func fnReconnect(ce *commands.Event, connector *EmailConnector) {
 	// Get user's logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -674,9 +580,9 @@ func parseQuotedArgs(args string) []string {
 }
 
 // processTextLogin processes a text-based login using the same flow as the interactive login
-func processTextLogin(ctx context.Context, ce *commands.Event, email, password string) error {
+func processTextLogin(ctx context.Context, ce *commands.Event, email, password string, connector *EmailConnector) error {
 	// Create a login process
-	loginProcess, err := ConnectorInstance.CreateLogin(ctx, ce.User, "email-password")
+	loginProcess, err := connector.CreateLogin(ctx, ce.User, "email-password")
 	if err != nil {
 		return fmt.Errorf("failed to create login process: %w", err)
 	}
@@ -744,7 +650,7 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 **Need help?** Use ` + "`!email help`" + ` for more information or ` + "`!email status`" + ` to check connection status.`
 }
 
-func fnPassphrase(ce *commands.Event) {
+func fnPassphrase(ce *commands.Event, connector *EmailConnector) {
 	
 	// Parse command arguments
 	if len(ce.Args) == 0 {

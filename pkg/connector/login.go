@@ -15,10 +15,11 @@ import (
 
 // EmailLoginProcess represents the email login flow
 type EmailLoginProcess struct {
-	user     *bridgev2.User
-	email    string
-	username string
-	password string
+	user      *bridgev2.User
+	connector *EmailConnector
+	email     string
+	username  string
+	password  string
 }
 
 var (
@@ -163,6 +164,7 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 // EmailUserLogin represents a logged-in email account
 type EmailUserLogin struct {
 	UserLogin *bridgev2.UserLogin
+	connector *EmailConnector
 	Email     string
 	Password  string
 	IMAPHost  string
@@ -172,17 +174,17 @@ type EmailUserLogin struct {
 
 func (eul *EmailUserLogin) Connect(ctx context.Context) error {
 	// Connection is handled by the IMAP manager
-	return ConnectorInstance.IMAPManager.AddAccount(eul.UserLogin, eul.Email, eul.Email, eul.Password)
+	return eul.connector.IMAPManager.AddAccount(eul.UserLogin, eul.Email, eul.Email, eul.Password)
 }
 
 func (eul *EmailUserLogin) Disconnect() {
 	// Disconnection is handled by the IMAP manager
-	ConnectorInstance.IMAPManager.RemoveAccount(eul.UserLogin.UserMXID.String(), eul.Email)
+	eul.connector.IMAPManager.RemoveAccount(eul.UserLogin.UserMXID.String(), eul.Email)
 }
 
 func (eul *EmailUserLogin) IsLoggedIn() bool {
 	// Check if account is active in IMAP manager
-	statuses := ConnectorInstance.IMAPManager.GetAccountStatus(eul.UserLogin.UserMXID.String())
+	statuses := eul.connector.IMAPManager.GetAccountStatus(eul.UserLogin.UserMXID.String())
 	for _, status := range statuses {
 		if status.Email == eul.Email {
 			return status.Connected
@@ -204,14 +206,14 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 	// Keep ctx parameter used to satisfy linters even if not currently leveraged here.
 	_ = ctx
 	// Create a temporary logger for testing (NO PASSWORDS LOGGED)
-	logger := ConnectorInstance.Bridge.Log.With().
+	logger := elp.connector.Bridge.Log.With().
 		Str("component", "login_test").
 		Str("email", elp.email).
 		Str("host_detected", strings.Split(elp.email, "@")[1]).
 		Logger()
 
 		// Create test IMAP client without UserLogin (just for testing connection)
-	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &logger, ConnectorInstance.Config.Logging.Sanitized, ConnectorInstance.Config.Logging.PseudonymSecret, ConnectorInstance.Config.Network.IMAP.StartupBackfillSeconds, ConnectorInstance.Config.Network.IMAP.StartupBackfillMax, ConnectorInstance.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
+	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &logger, elp.connector.Config.Logging.Sanitized, elp.connector.Config.Logging.PseudonymSecret, elp.connector.Config.Network.IMAP.StartupBackfillSeconds, elp.connector.Config.Network.IMAP.StartupBackfillMax, elp.connector.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
@@ -231,7 +233,7 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 
 // saveAccount saves the email account credentials to database
 func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
-	logger := ConnectorInstance.Bridge.Log.With().
+	logger := elp.connector.Bridge.Log.With().
 		Str("component", "login_save").
 		Str("email", elp.email).
 		Logger()
@@ -269,7 +271,7 @@ func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
 
 	logger.Debug().Str("host", host).Int("port", port).Bool("tls", tls).Msg("Attempting to save account to database")
 
-	if err := ConnectorInstance.DB.UpsertAccount(ctx, account); err != nil {
+	if err := elp.connector.DB.UpsertAccount(ctx, account); err != nil {
 		logger.Error().Err(err).Msg("Failed to save account credentials to database")
 		return err
 	}

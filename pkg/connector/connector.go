@@ -33,8 +33,6 @@ type EmailConnector struct {
 var (
 	_ bridgev2.NetworkConnector = (*EmailConnector)(nil)
 	_ bridgev2.StoppableNetwork = (*EmailConnector)(nil)
-	// Global connector instance for command access
-	ConnectorInstance *EmailConnector
 )
 
 func (ec *EmailConnector) GetName() bridgev2.BridgeName {
@@ -95,8 +93,6 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		ec.Config.Logging.Sanitized = false
 	}
 
-	// Set global instance for command access
-	ConnectorInstance = ec
 	
 	// Ensure ./data directory exists for local SQLite files and sidecar WAL/SHM files
 	dataDir := filepath.Join(".", "data")
@@ -115,11 +111,13 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	// Create database tables
 	ctx := context.Background()
 	if err := ec.DB.CreateTable(ctx); err != nil {
-		bridge.Log.Fatal().Err(err).Msg("Failed to create email_accounts table")
+		bridge.Log.Error().Err(err).Msg("Failed to create email_accounts table - bridge initialization failed")
+		panic(fmt.Errorf("database initialization failed: %w", err))
 	}
 	// Database health check: ensure we can write to the DB directory to avoid runtime I/O errors
 	if err := ec.checkDBWritable(ctx); err != nil {
-		bridge.Log.Fatal().Err(err).Msg("Database is not writable. Fix filesystem permissions or remove stale DB files, then restart the bridge.")
+		bridge.Log.Error().Err(err).Msg("Database is not writable. Fix filesystem permissions or remove stale DB files, then restart the bridge.")
+		panic(fmt.Errorf("database not writable: %w", err))
 	}
 	// Best-effort: add index for faster message lookups by (network, remote_id) if schema matches.
 	if _, err := bridge.DB.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_message_network_remote ON message(network, remote_id)`); err == nil {
@@ -150,18 +148,88 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	ec.Processor.GzipLargeBodies = ec.Config.Processing.GzipLargeBodies
 	ec.IMAPManager.SetProcessor(ec.Processor)
 	
-	// Add commands
+	// Add commands with connector context
 	ec.Bridge.Commands.(*commands.Processor).AddHandlers(
-		CommandPing,
-		CommandStatus,
-		CommandLogin,
-		CommandLogout,
-		CommandList,
-		CommandSync,
-		CommandReconnect,
-		CommandNuke,
-		CommandPassphrase,
+		ec.createCommands()...,
 	)
+}
+
+// createCommands creates command handlers with access to this connector instance
+func (ec *EmailConnector) createCommands() []commands.CommandHandler {
+	return []commands.CommandHandler{
+		&commands.FullHandler{
+			Func: fnPing,
+			Name: "ping",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionInfo,
+				Description: "Check if the bridge is alive",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnStatus(ce, ec) },
+			Name: "status",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionInfo,
+				Description: "Show connection status for your email accounts",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnLogin(ce, ec) },
+			Name: "login",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionAuth,
+				Description: "Login to an email account",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnLogout(ce, ec) },
+			Name: "logout",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionAuth,
+				Description: "Logout from email accounts",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnList(ce, ec) },
+			Name: "list",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionInfo,
+				Description: "List configured email accounts",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnSync(ce, ec) },
+			Name: "sync",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionInfo,
+				Description: "Manually trigger email synchronization",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnReconnect(ce, ec) },
+			Name: "reconnect",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionAdmin,
+				Description: "Reconnect to email servers",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnNuke(ce, ec) },
+			Name: "nuke",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionAdmin,
+				Description: "Remove all email accounts and reset database",
+			},
+		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnPassphrase(ce, ec) },
+			Name: "passphrase",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionAdmin,
+				Description: "Show database encryption passphrase",
+			},
+		},
+	}
 }
 
 func (ec *EmailConnector) Start(ctx context.Context) error {
@@ -177,9 +245,6 @@ func (ec *EmailConnector) Stop() {
 	if ec.IMAPManager != nil {
 		ec.IMAPManager.StopAll()
 	}
-	
-	// Clear global instance
-	ConnectorInstance = nil
 	
 	ec.Bridge.Log.Info().Msg("Email connector stopped")
 }
@@ -251,7 +316,7 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 
 // Required methods for NetworkConnector interface
 func (ec *EmailConnector) CreateLogin(ctx context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
-	return &EmailLoginProcess{user: user}, nil
+	return &EmailLoginProcess{user: user, connector: ec}, nil
 }
 
 func (ec *EmailConnector) GetDBMetaTables() []any {
