@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
@@ -39,38 +40,32 @@ func (r *DBThreadMetadataResolver) ResolveThreadID(receiver, messageID string) (
 	if mid == "" {
 		return "", false
 	}
-	ctx := context.Background()
+	// Use short timeout to avoid delaying email delivery - fast failure to heuristics is better UX
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
-	// Try both raw and namespaced remote IDs to be robust.
+	// Use single UNION query to check all possible table/column combinations efficiently
+	// Try both raw and namespaced remote IDs to be robust
 	candidates := []string{mid, "email:" + mid}
+	
+	// Build single query that tries all combinations with UNION
+	unionQuery := `
+		SELECT portal_id, 'message_with_receiver' as source FROM message 
+		WHERE network = ? AND remote_id = ? AND receiver = ?
+		UNION ALL
+		SELECT portal_id, 'message_no_receiver' as source FROM message 
+		WHERE network = ? AND remote_id = ?
+		UNION ALL  
+		SELECT portal_id, 'messages_with_receiver' as source FROM messages 
+		WHERE network = ? AND remote_id = ? AND receiver = ?
+		UNION ALL
+		SELECT portal_id, 'messages_no_receiver' as source FROM messages 
+		WHERE network = ? AND remote_id = ?
+		LIMIT 1`
+		
 	for _, rid := range candidates {
-		// Candidate queries. We try in order. Any SQL error is treated as a miss and we move on.
-		// 1) Common layout: message(network, remote_id, receiver, portal_id)
-		if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, rid, receiver); tid != "" {
-			ntid := normalizeThreadID(tid)
-			if r.Log != nil {
-				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
-			}
-			return ntid, true
-		}
-		// 2) Without receiver column
-		if tid := r.querySingleString(ctx, `SELECT portal_id FROM message WHERE network = ? AND remote_id = ?`, r.Network, rid); tid != "" {
-			ntid := normalizeThreadID(tid)
-			if r.Log != nil {
-				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
-			}
-			return ntid, true
-		}
-		// 3) Alternate table name: messages
-		if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ? AND receiver = ?`, r.Network, rid, receiver); tid != "" {
-			ntid := normalizeThreadID(tid)
-			if r.Log != nil {
-				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
-			}
-			return ntid, true
-		}
-		if tid := r.querySingleString(ctx, `SELECT portal_id FROM messages WHERE network = ? AND remote_id = ?`, r.Network, rid); tid != "" {
-			ntid := normalizeThreadID(tid)
+		if result := r.queryUnionResult(ctx, unionQuery, r.Network, rid, receiver, r.Network, rid, r.Network, rid, receiver, r.Network, rid); result != "" {
+			ntid := normalizeThreadID(result)
 			if r.Log != nil {
 				r.Log.Debug().Str("receiver", receiver).Str("remote_id", rid).Str("thread_id", ntid).Msg("DB resolver: resolved email message to thread")
 			}
@@ -84,16 +79,61 @@ func (r *DBThreadMetadataResolver) ResolveThreadID(receiver, messageID string) (
 	return "", false
 }
 
-func (r *DBThreadMetadataResolver) querySingleString(ctx context.Context, sql string, args ...any) string {
+func (r *DBThreadMetadataResolver) queryUnionResult(ctx context.Context, sql string, args ...any) string {
+	start := time.Now()
 	rows, err := r.Bridge.DB.Query(ctx, sql, args...)
 	if err != nil {
+		// Only log if it's not a simple "table doesn't exist" error (expected for best-effort)
+		if r.Log != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			r.Log.Debug().Err(err).Dur("duration", time.Since(start)).Msg("DB resolver union query failed")
+		}
 		return ""
 	}
 	defer rows.Close()
+	
+	if rows.Next() {
+		var portalID, source string
+		if err := rows.Scan(&portalID, &source); err == nil {
+			if r.Log != nil {
+				duration := time.Since(start)
+				if duration > 500*time.Millisecond {
+					r.Log.Warn().Dur("duration", duration).Str("source", source).Msg("DB resolver union query was slow")
+				}
+			}
+			return portalID
+		}
+		if r.Log != nil {
+			r.Log.Debug().Err(err).Msg("DB resolver union scan failed")
+		}
+	}
+	return ""
+}
+
+func (r *DBThreadMetadataResolver) querySingleString(ctx context.Context, sql string, args ...any) string {
+	start := time.Now()
+	rows, err := r.Bridge.DB.Query(ctx, sql, args...)
+	if err != nil {
+		// Only log if it's not a simple "table doesn't exist" error (expected for best-effort)
+		if r.Log != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			r.Log.Debug().Err(err).Dur("duration", time.Since(start)).Msg("DB resolver query failed")
+		}
+		return ""
+	}
+	defer rows.Close()
+	
 	if rows.Next() {
 		var out string
 		if err := rows.Scan(&out); err == nil {
+			if r.Log != nil {
+				duration := time.Since(start)
+				if duration > 500*time.Millisecond {
+					r.Log.Warn().Dur("duration", duration).Msg("DB resolver query was slow")
+				}
+			}
 			return out
+		}
+		if r.Log != nil {
+			r.Log.Debug().Err(err).Msg("DB resolver scan failed")
 		}
 	}
 	return ""
