@@ -103,8 +103,15 @@ func (p *Processor) ProcessIMAPMessage(ctx context.Context, fetchData *imapclien
 		return nil, fmt.Errorf("failed to parse IMAP fetch data: %w", err)
 	}
 	// Guard against degraded parse that lacks basic identity/threading info
-	if strings.TrimSpace(parsedEmail.From) == "" || strings.TrimSpace(parsedEmail.MessageID) == "" {
-		return nil, fmt.Errorf("degraded parse: missing from/message-id")
+	if strings.TrimSpace(parsedEmail.From) == "" {
+		return nil, fmt.Errorf("degraded parse: missing sender information")
+	}
+	if strings.TrimSpace(parsedEmail.MessageID) == "" {
+		return nil, fmt.Errorf("degraded parse: missing message-id header")
+	}
+	// Validate MessageID format to prevent injection attacks
+	if len(parsedEmail.MessageID) > 998 { // RFC 5322 line length limit
+		return nil, fmt.Errorf("degraded parse: message-id exceeds RFC limits")
 	}
 
 	if p.sanitized {
@@ -329,8 +336,9 @@ func (p *Processor) parseMIMEContent(data []byte) (textContent, htmlContent stri
 	// Check Content-Type header
 	contentType := msg.Header.Get("Content-Type")
 	if contentType == "" {
-		// No content type: try boundary heuristic
-		raw, _ := io.ReadAll(decodeBody(msg.Body, cte))
+		// No content type: try boundary heuristic with standard email size limit
+		limitedReader := io.LimitReader(decodeBody(msg.Body, cte), 25*1024*1024) // 25MB standard limit
+		raw, _ := io.ReadAll(limitedReader)
 		if boundary := detectBoundary(raw); boundary != "" {
 			return p.parseMultipartContent(bytes.NewReader(raw), boundary)
 		}
@@ -341,24 +349,28 @@ func (p *Processor) parseMIMEContent(data []byte) (textContent, htmlContent stri
 	// Parse media type
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		// Fallback to plain text (decoded)
-		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
+		// Fallback to plain text (decoded) with standard email size limit
+		limitedReader := io.LimitReader(decodeBody(msg.Body, cte), 25*1024*1024) // 25MB standard limit
+		body, _ := io.ReadAll(limitedReader)
 		return string(body), ""
 	}
 
 	switch {
 	case strings.HasPrefix(mediaType, "text/plain"):
-		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
+		limitedReader := io.LimitReader(decodeBody(msg.Body, cte), 25*1024*1024) // 25MB standard limit
+		body, _ := io.ReadAll(limitedReader)
 		return string(body), ""
 	case strings.HasPrefix(mediaType, "text/html"):
-		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
+		limitedReader := io.LimitReader(decodeBody(msg.Body, cte), 25*1024*1024) // 25MB standard limit
+		body, _ := io.ReadAll(limitedReader)
 		return "", string(body)
 	case strings.HasPrefix(mediaType, "multipart/"):
 		// Handle multipart messages
 		return p.parseMultipartContent(msg.Body, params["boundary"])
 	default:
-		// Unknown content type, try to read as text (decoded)
-		body, _ := io.ReadAll(decodeBody(msg.Body, cte))
+		// Unknown content type, try to read as text (decoded) with standard email size limit
+		limitedReader := io.LimitReader(decodeBody(msg.Body, cte), 25*1024*1024) // 25MB standard limit
+		body, _ := io.ReadAll(limitedReader)
 		return string(body), ""
 	}
 }
@@ -379,10 +391,11 @@ func (p *Processor) parseMultipartContent(body io.Reader, boundary string) (text
 			continue
 		}
 
-		// Decode part body according to Content-Transfer-Encoding
+		// Decode part body according to Content-Transfer-Encoding with standard email size limit
 		cte := strings.ToLower(part.Header.Get("Content-Transfer-Encoding"))
 		decoded := decodeBody(part, cte)
-		partData, err := io.ReadAll(decoded)
+		limitedReader := io.LimitReader(decoded, 25*1024*1024) // 25MB standard limit
+		partData, err := io.ReadAll(limitedReader)
 		part.Close()
 		if err != nil {
 			continue
@@ -501,10 +514,11 @@ mr := multipart.NewReader(body, boundary)
 		contentDisposition := part.Header.Get("Content-Disposition")
 		dispLower := strings.ToLower(strings.TrimSpace(contentDisposition))
 
-// Read and decode part body
+// Read and decode part body with standard email size limit
 		cte := strings.ToLower(part.Header.Get("Content-Transfer-Encoding"))
 		decoded := decodeBody(part, cte)
-		dataBytes, err := io.ReadAll(decoded)
+		limitedReader := io.LimitReader(decoded, 25*1024*1024) // 25MB standard limit
+		dataBytes, err := io.ReadAll(limitedReader)
 		part.Close()
 		if err != nil {
 			continue
@@ -829,8 +843,8 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "⚠️ Your email could not be fully processed by the bridge. The original message may have been dropped. Please report this to the bridge maintainers."}
 			appendPart("error-placeholder", n)
 			cm = &bridgev2.ConvertedMessage{Parts: parts}
-			// Return proper error to caller while still providing placeholder message for user experience
-			err = fmt.Errorf("email conversion panicked during processing: %v", r)
+			// Clear err to prevent confusing dual state - placeholder message is the recovery strategy
+			err = nil
 		}
 	}()
 
@@ -1130,7 +1144,8 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 		// Split the body into multiple UTF-8 safe chunks.
 		remaining := content.Body
 		chunkIndex := 1
-		for len(remaining) > 0 {
+		const maxChunks = 50 // Prevent excessive chunking that could overwhelm Matrix
+		for len(remaining) > 0 && chunkIndex <= maxChunks {
 			pid := fmt.Sprintf("body-chunk-%d", chunkIndex)
 			// Try to cut a chunk that fits comfortably under the target
 			chunk, _ := truncateUTF8PreserveWords(remaining, PerEventTarget)
@@ -1161,6 +1176,11 @@ parts = append(parts, &bridgev2.ConvertedMessagePart{ID: networkid.PartID(pid), 
 				remaining = strings.TrimLeft(remaining, " \n\t\r")
 			}
 			chunkIndex++
+		}
+		// If we hit the chunk limit, warn about truncated content
+		if len(remaining) > 0 && chunkIndex > maxChunks {
+			truncateContent := &event.MessageEventContent{MsgType: event.MsgNotice, Body: fmt.Sprintf("Message was too large and has been truncated. %d characters omitted to prevent server overload.", len(remaining))}
+			appendPart("truncate-notice", truncateContent)
 		}
 	}
 

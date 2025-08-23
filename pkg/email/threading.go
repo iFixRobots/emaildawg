@@ -514,13 +514,17 @@ func (tm *ThreadManager) evictOldestThreads(countToRemove int) {
 		})
 	}
 	
-	// Sort by LastAccessed (oldest first)
-	for i := 0; i < len(threads)-1; i++ {
-		for j := i + 1; j < len(threads); j++ {
-			if threads[i].lastAccessed.After(threads[j].lastAccessed) {
-				threads[i], threads[j] = threads[j], threads[i]
-			}
+	// Sort by LastAccessed (oldest first) using efficient algorithm
+	// Use simple insertion sort which is O(n) for nearly-sorted data and O(n²) worst case
+	// but much more cache-friendly than bubble sort
+	for i := 1; i < len(threads); i++ {
+		key := threads[i]
+		j := i - 1
+		for j >= 0 && threads[j].lastAccessed.After(key.lastAccessed) {
+			threads[j+1] = threads[j]
+			j--
 		}
+		threads[j+1] = key
 	}
 	
 	// Remove the oldest entries
