@@ -120,10 +120,13 @@ func (cb *CircuitBreaker) checkStateAndIncrement() (bool, error) {
 				cb.state = StateHalfOpen
 				atomic.StoreInt32(&cb.halfOpenRequests, 0) // Reset counter
 				
-				// Notify callback of state change
-				if cb.stateChangeCallback != nil {
-					cb.stateChangeCallback(oldState, StateHalfOpen)
+				// Notify callback of state change outside lock to prevent deadlock
+				callback := cb.stateChangeCallback
+				cb.mu.Unlock()
+				if callback != nil {
+					callback(oldState, StateHalfOpen)
 				}
+				cb.mu.Lock() // Re-acquire for defer unlock
 			}
 			currentState = cb.state // Update local state
 			cb.mu.Unlock()
@@ -135,14 +138,14 @@ func (cb *CircuitBreaker) checkStateAndIncrement() (bool, error) {
 		// Fall through to handle StateHalfOpen case if we transitioned
 		fallthrough
 	case StateHalfOpen:
-		// Limit concurrent requests in half-open state
-		currentRequests := atomic.LoadInt32(&cb.halfOpenRequests)
-		if currentRequests >= int32(cb.maxHalfOpenRequests) {
+		// Atomically increment and check limit to prevent race condition
+		newRequests := atomic.AddInt32(&cb.halfOpenRequests, 1)
+		if newRequests > int32(cb.maxHalfOpenRequests) {
+			// Over limit - decrement back and reject
+			atomic.AddInt32(&cb.halfOpenRequests, -1)
 			return false, ErrTooManyRequests
 		}
-		// Increment counter atomically
-		atomic.AddInt32(&cb.halfOpenRequests, 1)
-		return true, nil // We incremented, so caller should decrement
+		return true, nil // We incremented successfully, caller should decrement
 	}
 	return false, nil
 }
@@ -150,7 +153,6 @@ func (cb *CircuitBreaker) checkStateAndIncrement() (bool, error) {
 // recordResult records the result of the executed function
 func (cb *CircuitBreaker) recordResult(err error) {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
 
 	oldState := cb.state
 
@@ -173,9 +175,17 @@ func (cb *CircuitBreaker) recordResult(err error) {
 		atomic.StoreInt32(&cb.halfOpenRequests, 0)
 	}
 
-	// Notify callback if state changed
+	// Notify callback if state changed - execute outside lock to prevent deadlock
+	var callback StateChangeCallback
+	var newState CircuitBreakerState
 	if oldState != cb.state && cb.stateChangeCallback != nil {
-		cb.stateChangeCallback(oldState, cb.state)
+		callback = cb.stateChangeCallback
+		newState = cb.state
+	}
+	cb.mu.Unlock() // Release lock before callback
+	
+	if callback != nil {
+		callback(oldState, newState)
 	}
 }
 
