@@ -2,16 +2,12 @@ package reliability
 
 import (
 	"context"
+	"crypto/rand"
 	"math"
-	"math/rand"
+	mathrand "math/rand"
 	"strings"
 	"time"
 )
-
-// init seeds the legacy PRNG to avoid predictable output
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 // RetryConfig holds configuration for retry operations
 type RetryConfig struct {
@@ -134,9 +130,9 @@ func (c RetryConfig) calculateDelay(attempt int) time.Duration {
 	
 	// Add jitter if enabled, ensuring it doesn't exceed MaxDelay
 	if c.Jitter {
-		// Add random jitter up to 25% of the delay
+		// Add cryptographically secure random jitter up to 25% of the delay
 		jitterRange := delay * 0.25
-		jitter := rand.Float64() * jitterRange
+		jitter := secureRandFloat64() * jitterRange
 		delay += jitter
 		
 		// Ensure jitter doesn't push us past MaxDelay
@@ -207,6 +203,20 @@ func IsRetryableError(err error) bool {
 	}
 	
 	return false
+}
+
+// secureRandFloat64 generates a cryptographically secure random float64 in [0, 1)
+func secureRandFloat64() float64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to math/rand if crypto/rand fails - rare but possible
+		return mathrand.Float64()
+	}
+	// Convert 8 bytes to uint64, then to float64 in [0, 1)
+	u := uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
+		uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
+	// Use IEEE 754 double precision mantissa (53 bits) for uniform distribution
+	return float64(u>>11) / float64(1<<53)
 }
 
 // contains checks if a string contains a substring (case-insensitive)
