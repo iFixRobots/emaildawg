@@ -97,7 +97,7 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 		case "email":
 			elp.email = strings.TrimSpace(value)
 		case "password":
-			elp.password = value
+			elp.password = strings.TrimSpace(value)
 		}
 	}
 
@@ -208,12 +208,17 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 	// Create a temporary logger for testing (NO PASSWORDS LOGGED)
 	logger := elp.connector.Bridge.Log.With().
 		Str("component", "login_test").
-		Str("email", elp.email).
-		Str("host_detected", strings.Split(elp.email, "@")[1]).
-		Logger()
+		Str("email", elp.email)
+	
+	// Safely extract domain for logging
+	if parts := strings.Split(elp.email, "@"); len(parts) == 2 {
+		logger = logger.Str("host_detected", parts[1])
+	}
+	
+	finalLogger := logger.Logger()
 
 		// Create test IMAP client without UserLogin (just for testing connection)
-	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &logger, elp.connector.Config.Logging.Sanitized, elp.connector.Config.Logging.PseudonymSecret, elp.connector.Config.Network.IMAP.StartupBackfillSeconds, elp.connector.Config.Network.IMAP.StartupBackfillMax, elp.connector.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
+	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &finalLogger, elp.connector.Config.Logging.Sanitized, elp.connector.Config.Logging.PseudonymSecret, elp.connector.Config.Network.IMAP.StartupBackfillSeconds, elp.connector.Config.Network.IMAP.StartupBackfillMax, elp.connector.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
@@ -227,7 +232,7 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 	// Clean up test connection
 	client.Disconnect()
 
-	logger.Info().Msg("IMAP connection test successful")
+	finalLogger.Info().Msg("IMAP connection test successful")
 	return nil
 }
 
@@ -241,7 +246,11 @@ func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
 	logger.Info().Msg("Saving account credentials to database")
 
 	// Auto-detect provider settings for saving
-	domain := strings.ToLower(strings.Split(elp.email, "@")[1])
+	parts := strings.Split(elp.email, "@")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid email format: %s", elp.email)
+	}
+	domain := strings.ToLower(parts[1])
 	var host string
 	var port int
 	var tls bool
