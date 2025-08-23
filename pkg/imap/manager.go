@@ -245,10 +245,6 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 				
 				// Attempt to bring the client back online even if it's currently disconnected
 				logger.Warn().Msg("Client disconnected, attempting reconnect from watchdog")
-				// Demote bridge state for this login while attempting recovery (send only on transition)
-				if client.login != nil {
-					// State coordinator handles bridge state now
-				}
 				if recErr := client.Reconnect(); recErr != nil {
 					// Check if error indicates concurrent operation in progress
 					if strings.Contains(recErr.Error(), "already in progress") {
@@ -272,10 +268,6 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 			}
 			if err := client.TestConnection(); err != nil {
 				logger.Warn().Err(err).Msg("Health probe failed, triggering reconnect")
-				// Demote while we recover (send only on transition)
-				if client.login != nil {
-					// State coordinator handles bridge state now
-				}
 				if recErr := client.Reconnect(); recErr != nil {
 					// Check if error indicates concurrent operation in progress
 					if strings.Contains(recErr.Error(), "already in progress") {
@@ -291,9 +283,6 @@ func (m *Manager) startWatchdog(userMXID, email string, client *Client) {
 						if !strings.Contains(err.Error(), "already running") {
 							logger.Warn().Err(err).Msg("Reconnected but failed to start IDLE")
 						}
-					} else if client.login != nil {
-						// Promote to connected after successful IDLE start
-						// State coordinator handles bridge state now
 					}
 				}
 			}

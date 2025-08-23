@@ -1744,9 +1744,6 @@ func (c *Client) triggerReconnect() {
 }
 
 
-// reportConnectionStatus is deprecated - replaced by state coordinator
-// Keeping as a stub to avoid breaking existing code during transition
-
 // sentHealthLoop periodically NOOPs the Sent connection and triggers a rebuild on failure.
 func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(1 * time.Minute)
