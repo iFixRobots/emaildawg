@@ -166,15 +166,22 @@ func generateAndStorePassphrase() (string, error) {
 		return "", fmt.Errorf("failed to write passphrase file: %w", err)
 	}
 	
-	fmt.Printf("Auto-generated secure passphrase stored at: %s\n", passphrasePath)
-	fmt.Println("EmailDawg is now ready to use! Your credentials will be securely encrypted.")
+	// Log to stderr to avoid potential information disclosure in stdout logs
+	fmt.Fprintf(os.Stderr, "Auto-generated secure passphrase stored (check config directory)\n")
+	fmt.Fprintf(os.Stderr, "EmailDawg is ready! Your credentials will be securely encrypted.\n")
 	
 	return passphrase, nil
 }
 
 // getSalt returns the salt for PBKDF2, generating one if needed
 func getSalt() ([]byte, error) {
-	saltPath := filepath.Join(".", "data", "emaildawg.salt")
+	// Use absolute path for security - prevent directory traversal attacks
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get working directory: %w", err)
+	}
+	dataDir := filepath.Join(cwd, "data")
+	saltPath := filepath.Join(dataDir, "emaildawg.salt")
 	
 	// Try to read existing salt
 	if data, err := os.ReadFile(saltPath); err == nil {
@@ -191,7 +198,7 @@ func getSalt() ([]byte, error) {
 	}
 	
 	// Create directory with secure permissions
-	if err := os.MkdirAll(filepath.Join(".", "data"), 0o700); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 	
@@ -315,6 +322,10 @@ func (eaq *EmailAccountQuery) GetAccount(ctx context.Context, userMXID, email st
 	defer rows.Close()
 	
 	if !rows.Next() {
+		// Check if Next() failed due to an error
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("database query failed: %w", err)
+		}
 		return nil, nil // No account found
 	}
 	
@@ -328,7 +339,8 @@ func (eaq *EmailAccountQuery) GetAccount(ctx context.Context, userMXID, email st
 	// Decrypt password (fresh deployments always store encrypted)
 	plain, derr := decryptString(account.Password)
 	if derr != nil {
-		return nil, fmt.Errorf("failed to decrypt stored password: %w", derr)
+		// Don't expose decryption details to prevent information disclosure
+		return nil, fmt.Errorf("failed to decrypt stored credentials")
 	}
 	account.Password = plain
 	return account, nil
@@ -358,7 +370,8 @@ func (eaq *EmailAccountQuery) GetUserAccounts(ctx context.Context, userMXID stri
 		}
 		plain, derr := decryptString(account.Password)
 		if derr != nil {
-			return nil, fmt.Errorf("failed to decrypt stored password: %w", derr)
+			// Don't expose decryption details to prevent information disclosure
+			return nil, fmt.Errorf("failed to decrypt stored credentials")
 		}
 		account.Password = plain
 		accounts = append(accounts, account)
