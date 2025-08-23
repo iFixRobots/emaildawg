@@ -129,18 +129,36 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 	if connector.IMAPManager != nil {
 		connector.IMAPManager.StopAll()
 	}
-	// Try common DB file locations based on defaults and documentation
-	candidates := []string{
+	
+	// Get current working directory for secure path resolution
+	cwd, err := os.Getwd()
+	if err != nil {
+		ce.Reply("❌ Failed to get current directory: %s", err.Error())
+		return
+	}
+	
+	// Try common DB file locations using absolute paths for security
+	relativeCandidates := []string{
 		"emaildawg.db",
-		"emaildawg.db-wal",
+		"emaildawg.db-wal", 
 		"emaildawg.db-shm",
-		"./data/emaildawg.db",
-		"./data/emaildawg.db-wal",
-		"./data/emaildawg.db-shm",
+		"data/emaildawg.db",
+		"data/emaildawg.db-wal",
+		"data/emaildawg.db-shm",
 		"sh-emaildawg.db",
 		"sh-emaildawg.db-wal",
 		"sh-emaildawg.db-shm",
 	}
+	
+	var candidates []string
+	for _, relPath := range relativeCandidates {
+		absPath := filepath.Join(cwd, relPath)
+		// Validate the path is within the working directory for security
+		if cleanPath := filepath.Clean(absPath); strings.HasPrefix(cleanPath, cwd) {
+			candidates = append(candidates, cleanPath)
+		}
+	}
+	
 	removed := 0
 	for _, path := range candidates {
 		if err := os.Remove(path); err == nil {
@@ -399,32 +417,40 @@ func fnSync(ce *commands.Event, connector *EmailConnector) {
 	var successes []string
 	var failures []string
 
-	// Create context with timeout for all sync operations
+	// Create context with timeout for all sync operations, derived from command context
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	for _, login := range logins {
 		if client, ok := login.Client.(*EmailClient); ok {
-			if client.IMAPClient != nil && client.IMAPClient.IsConnected() {
-				// Use channel to handle timeout for each account
+			// Capture IMAP client reference safely to prevent nil pointer panic
+			imapClient := client.IMAPClient
+			if imapClient != nil && imapClient.IsConnected() {
+				// Create individual context for each sync operation
+				syncCtx, syncCancel := context.WithTimeout(ctx, 30*time.Second)
 				done := make(chan error, 1)
+				
 				go func() {
-					done <- client.IMAPClient.CheckNewMessages()
+					defer syncCancel() // Ensure context is cancelled when goroutine exits
+					select {
+					case done <- imapClient.CheckNewMessages():
+					case <-syncCtx.Done():
+						// Context cancelled, exit goroutine cleanly
+						return
+					}
 				}()
 
 				select {
 				case err := <-done:
+					syncCancel() // Cancel context as operation completed
 					if err != nil {
 						failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
 					} else {
 						successes = append(successes, client.Email)
 					}
-				case <-ctx.Done():
-					failures = append(failures, fmt.Sprintf("%s: sync timed out after 60 seconds", client.Email))
-					// Drain the done channel to prevent goroutine leak
-					go func() {
-						<-done
-					}()
+				case <-syncCtx.Done():
+					// Timeout occurred, context will cancel the goroutine
+					failures = append(failures, fmt.Sprintf("%s: sync timed out after 30 seconds", client.Email))
 				}
 			} else {
 				failures = append(failures, fmt.Sprintf("%s: not connected", client.Email))
@@ -469,13 +495,15 @@ func fnReconnect(ce *commands.Event, connector *EmailConnector) {
 
 		ce.Reply("🔌 Reconnecting **%s**...", emailAddr)
 		if client, ok := targetLogin.Client.(*EmailClient); ok {
-			if client.IMAPClient != nil {
-				if err := client.IMAPClient.Reconnect(); err != nil {
+			// Capture IMAP client reference safely to prevent nil pointer panic
+			imapClient := client.IMAPClient
+			if imapClient != nil {
+				if err := imapClient.Reconnect(); err != nil {
 					ce.Reply("❌ Reconnection failed for **%s**: %s", emailAddr, err.Error())
 					return
 				}
 				// Start IDLE after successful reconnect
-				if err := client.IMAPClient.StartIDLE(); err != nil {
+				if err := imapClient.StartIDLE(); err != nil {
 					ce.Reply("⚠️ Reconnected **%s** but IDLE failed to start: %s", emailAddr, err.Error())
 				} else {
 					ce.Reply("✅ Successfully reconnected **%s**", emailAddr)
@@ -493,15 +521,19 @@ func fnReconnect(ce *commands.Event, connector *EmailConnector) {
 	var failures []string
 
 	for _, login := range logins {
-		if client, ok := login.Client.(*EmailClient); ok && client.IMAPClient != nil {
-			if err := client.IMAPClient.Reconnect(); err != nil {
-				failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
-				continue
-			}
-			if err := client.IMAPClient.StartIDLE(); err != nil {
-				failures = append(failures, fmt.Sprintf("%s: IDLE failed - %s", client.Email, err.Error()))
-			} else {
-				successes = append(successes, client.Email)
+		if client, ok := login.Client.(*EmailClient); ok {
+			// Capture IMAP client reference safely to prevent nil pointer panic
+			imapClient := client.IMAPClient
+			if imapClient != nil {
+				if err := imapClient.Reconnect(); err != nil {
+					failures = append(failures, fmt.Sprintf("%s: %s", client.Email, err.Error()))
+					continue
+				}
+				if err := imapClient.StartIDLE(); err != nil {
+					failures = append(failures, fmt.Sprintf("%s: IDLE failed - %s", client.Email, err.Error()))
+				} else {
+					successes = append(successes, client.Email)
+				}
 			}
 		}
 	}
@@ -591,6 +623,20 @@ func processTextLogin(ctx context.Context, ce *commands.Event, email, password s
 	emailLogin, ok := loginProcess.(*EmailLoginProcess)
 	if !ok {
 		return fmt.Errorf("unexpected login process type")
+	}
+
+	// Validate inputs before setting (additional validation beyond parseLoginArgs)
+	email = strings.TrimSpace(email)
+	password = strings.TrimSpace(password)
+	
+	if len(email) > 256 {
+		return fmt.Errorf("email address too long (max 256 characters)")
+	}
+	if len(password) > 1024 {
+		return fmt.Errorf("password too long (max 1024 characters)")
+	}
+	if len(password) == 0 {
+		return fmt.Errorf("password cannot be empty")
 	}
 
 	// Set the credentials directly
