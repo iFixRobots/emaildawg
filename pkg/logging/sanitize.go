@@ -32,12 +32,12 @@ func MaskEmail(s string) string {
 }
 
 func HashHMAC(s, secret string, n int) string {
-	// If secret is empty, avoid producing predictable hashes silently.
-	// Fall back to hashing with a fixed label and input, which is still deterministic but
-	// separates from the intended secret-based HMAC usage. Callers should set a secret.
+	// If secret is empty, return a safe placeholder instead of a predictable hash
+	// that could lead to information disclosure
 	key := []byte(secret)
 	if len(key) == 0 {
-		key = []byte("emaildawg-hash")
+		// Return safe placeholder instead of predictable hash
+		return "[redacted-no-secret]"
 	}
 	h := hmac.New(sha256.New, key)
 	h.Write([]byte(s))
@@ -100,7 +100,21 @@ func BoundAndClean(s string, max int) string {
 	}
 	out := b.String()
 	if max > 0 && len(out) > max {
-		return out[:max]
+		// Ensure we don't cut in the middle of a UTF-8 sequence
+		cut := max
+		for cut > 0 && cut < len(out) {
+			if (out[cut] & 0x80) == 0 { // ASCII character
+				break
+			}
+			if (out[cut] & 0xC0) == 0xC0 { // Start of UTF-8 sequence
+				break
+			}
+			cut-- // Move back to avoid cutting mid-sequence
+		}
+		if cut <= 0 {
+			cut = max // Fallback if we can't find a safe boundary
+		}
+		return out[:cut]
 	}
 	return out
 }

@@ -47,31 +47,45 @@ func IMAPTimeouts() TimeoutConfig {
 }
 
 // runWithCtx executes a function with context and handles goroutine management
+// WARNING: This function cannot prevent goroutine leaks if fn() doesn't respect context cancellation.
+// Callers must ensure fn() checks ctx.Done() periodically to avoid resource leaks.
 func runWithCtx(ctx context.Context, logger Logger, fn func(context.Context) error) error {
 	done := make(chan error, 1)
+	
 	go func() {
 		defer func() {
 			// Recover from any panic in fn to prevent goroutine leak
 			if r := recover(); r != nil {
-				done <- fmt.Errorf("panic in context function: %v", r)
+				select {
+				case done <- fmt.Errorf("panic in context function: %v", r):
+				default:
+					// Channel full, receiver already gone - log the panic
+					if logger != nil {
+						logger.Error("unhandled panic in timed-out function: %v", r)
+					}
+				}
 			}
 		}()
-		done <- fn(ctx)
+		
+		// Execute function and send result (non-blocking to prevent goroutine leak)
+		err := fn(ctx)
+		select {
+		case done <- err:
+			// Successfully sent result
+		default:
+			// Channel full (receiver already gone due to timeout)
+			// This is expected behavior when function completes after timeout
+		}
 	}()
 	
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		// Non-blocking drain of done channel
-		select {
-		case <-done:
-			// Function completed after context cancellation, no leak
-		default:
-			// Function hasn't finished - potential goroutine leak
-			if logger != nil {
-				logger.Warn("potential goroutine leak: function did not complete before context cancellation")
-			}
+		// Context cancelled/timed out - return immediately
+		// Note: goroutine may still be running if fn() doesn't respect context
+		if logger != nil {
+			logger.Warn("function execution cancelled due to timeout - goroutine may still be running if function doesn't check context")
 		}
 		return ctx.Err()
 	}
