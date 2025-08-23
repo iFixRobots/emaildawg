@@ -133,8 +133,8 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	}
 
 	// Automatically connect the client after loading
-	// Outbound attribution preference is controlled via config/env at startup.
-	go emailClient.Connect(ctx)
+	// Use background context for long-running connection, not the short-lived LoadUserLogin context
+	go emailClient.Connect(context.Background())
 
 	// Register client with IMAP manager for status reporting
 	go func() {
@@ -173,15 +173,21 @@ func (ec *EmailClient) Connect(ctx context.Context) {
 	// We're connected to the server; emit RUNNING (service up but not yet fully ready)
 	// Note: the actual connection_established event will be reported by the IMAP client
 
-	ec.isConnected.Store(true)
-
 	// Start IMAP IDLE monitoring with retry logic (includes baseline/backfill)
 	if err := ec.startIDLEWithRetry(); err != nil {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to start IMAP IDLE after retries")
+		// Disconnect and reset state since IDLE failed
+		ec.isConnected.Store(false)
+		if ec.IMAPClient != nil {
+			ec.IMAPClient.Disconnect()
+		}
 		// Report IDLE startup failure - this will be handled by the state coordinator
 		ec.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventIdleFailed), false, imap.EmailIdleFailed, map[string]any{"go_error": err.Error(), "error_type": "IDLE_startup_failed"})
 		return
 	}
+
+	// Only mark as connected after IDLE successfully starts
+	ec.isConnected.Store(true)
 
 	// Start background loops now that IDLE is running and baseline/backfill are done
 	ec.startLoops()
@@ -225,9 +231,11 @@ func (ec *EmailClient) LogoutRemote(ctx context.Context) {
 		ec.UserLogin.Log.Error().Err(err).Msg("Failed to remove account from IMAP manager")
 	}
 
-	// Clear credentials
+	// Clear credentials safely - ensure no ongoing sync operations access IMAP client
+	ec.historySyncMutex.Lock()
 	ec.Password = ""
 	ec.IMAPClient = nil
+	ec.historySyncMutex.Unlock()
 
 	// CRITICAL: Delete the UserLogin record from bridgev2 database
 	// This is what actually removes the login from the bridge framework
@@ -259,8 +267,11 @@ func (ec *EmailClient) Stop(ctx context.Context) {
 	// Stop all background loops
 	if cancel := ec.stopLoops.Swap(nil); cancel != nil {
 		(*cancel)()
-		// Give goroutines time to exit cleanly
-		time.Sleep(100 * time.Millisecond)
+		
+		// Wait for any ongoing periodic sync to complete before proceeding
+		// This prevents race conditions with IMAP client cleanup
+		ec.historySyncMutex.Lock()
+		ec.historySyncMutex.Unlock()
 	}
 
 	// Disconnect from IMAP server
@@ -370,15 +381,16 @@ func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
 
 	ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Starting periodic sync")
 
-	// Trigger IMAP to check for new messages (in case IDLE missed something)
-	if ec.IMAPClient != nil && ec.IMAPClient.IsConnected() {
-		if ec.IMAPClient.IsIDLERunning() {
+	// Capture IMAP client reference safely to prevent nil pointer panic
+	imapClient := ec.IMAPClient
+	if imapClient != nil && imapClient.IsConnected() {
+		if imapClient.IsIDLERunning() {
 			ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] IDLE is running - triggering manual check (will interrupt IDLE)")
 		} else {
 			ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] IDLE not running - safe to check messages")
 		}
 
-		if err := ec.IMAPClient.CheckNewMessages(); err != nil {
+		if err := imapClient.CheckNewMessages(); err != nil {
 			ec.UserLogin.Log.Warn().Err(err).Msg("[PERIODIC SYNC] Failed to check for new messages during periodic sync")
 		} else {
 			ec.UserLogin.Log.Debug().Msg("[PERIODIC SYNC] Message check completed successfully")
