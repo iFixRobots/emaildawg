@@ -109,35 +109,6 @@ func (r *DBThreadMetadataResolver) queryUnionResult(ctx context.Context, sql str
 	return ""
 }
 
-func (r *DBThreadMetadataResolver) querySingleString(ctx context.Context, sql string, args ...any) string {
-	start := time.Now()
-	rows, err := r.Bridge.DB.Query(ctx, sql, args...)
-	if err != nil {
-		// Only log if it's not a simple "table doesn't exist" error (expected for best-effort)
-		if r.Log != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
-			r.Log.Debug().Err(err).Dur("duration", time.Since(start)).Msg("DB resolver query failed")
-		}
-		return ""
-	}
-	defer rows.Close()
-	
-	if rows.Next() {
-		var out string
-		if err := rows.Scan(&out); err == nil {
-			if r.Log != nil {
-				duration := time.Since(start)
-				if duration > 500*time.Millisecond {
-					r.Log.Warn().Dur("duration", duration).Msg("DB resolver query was slow")
-				}
-			}
-			return out
-		}
-		if r.Log != nil {
-			r.Log.Debug().Err(err).Msg("DB resolver scan failed")
-		}
-	}
-	return ""
-}
 
 func normalizeThreadID(portalOrThreadID string) string {
 	id := strings.TrimSpace(portalOrThreadID)

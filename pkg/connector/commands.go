@@ -218,7 +218,7 @@ func fnLogin(ce *commands.Event, connector *EmailConnector) {
 	ce.Reply(buildEnhancedLoginInstructions(step.Instructions))
 }
 
-func fnLogout(ce *commands.Event, connector *EmailConnector) {
+func fnLogout(ce *commands.Event) {
 	// Check if user has any active logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -373,7 +373,7 @@ Need help? Use ` + "`!email help`" + ` for more information.
 	ce.Reply(response)
 }
 
-func fnSync(ce *commands.Event, connector *EmailConnector) {
+func fnSync(ce *commands.Event) {
 	// Get user's logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -469,7 +469,7 @@ func fnSync(ce *commands.Event, connector *EmailConnector) {
 	ce.Reply(result.String())
 }
 
-func fnReconnect(ce *commands.Event, connector *EmailConnector) {
+func fnReconnect(ce *commands.Event) {
 	// Get user's logins
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
@@ -696,7 +696,7 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 **Need help?** Use ` + "`!email help`" + ` for more information or ` + "`!email status`" + ` to check connection status.`
 }
 
-func fnPassphrase(ce *commands.Event, connector *EmailConnector) {
+func fnPassphrase(ce *commands.Event) {
 	
 	// Parse command arguments
 	if len(ce.Args) == 0 {
