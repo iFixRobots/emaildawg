@@ -90,6 +90,15 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 		// Calculate delay with exponential backoff
 		delay := config.calculateDelay(attempt)
 		
+		// For circuit breaker errors, use a longer minimum delay to allow recovery
+		if err == ErrCircuitBreakerOpen || err == ErrTooManyRequests {
+			// Circuit breaker timeout is typically 2 minutes, so wait at least that long
+			circuitBreakerWait := 2*time.Minute + 30*time.Second // Add 30s buffer
+			if delay < circuitBreakerWait {
+				delay = circuitBreakerWait
+			}
+		}
+		
 		// Wait with context cancellation support
 		select {
 		case <-time.After(delay):
@@ -337,6 +346,11 @@ func CategorizeError(err error) ErrorCategory {
 
 // ShouldRetry determines if an error should be retried based on its category
 func ShouldRetry(err error) bool {
+	// Handle circuit breaker errors specially - they should be retried but with longer delays
+	if err == ErrCircuitBreakerOpen || err == ErrTooManyRequests {
+		return true
+	}
+	
 	category := CategorizeError(err)
 	
 	switch category {

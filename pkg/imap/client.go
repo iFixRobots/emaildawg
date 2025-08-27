@@ -1875,10 +1875,10 @@ func (c *Client) performIDLERecovery() error {
 		return c.reconnectClient()
 	}
 	
-	// Use circuit breaker with retry logic for robust recovery
-	return c.circuitBreaker.Execute(func() error {
-		// Use RetryWithBackoff for the actual reconnection attempt
-		return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
+	// Use retry logic that's circuit breaker aware
+	return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
+		// Try to execute through circuit breaker
+		return c.circuitBreaker.Execute(func() error {
 			c.log.Info().Msg("Attempting IDLE recovery with circuit breaker protection")
 			
 			// First attempt to reconnect
