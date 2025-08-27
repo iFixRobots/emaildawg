@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -16,6 +17,7 @@ import (
 	"net/textproto"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 	"time"
 
@@ -1007,7 +1009,10 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 // Add HTML formatting if available
 	if origHTML != "" && origHTML != e.emailMessage.TextContent {
 		content.Format = event.FormatHTML
-		content.FormattedBody = origHTML
+		// Decode HTML entities in the formatted body before sending to Matrix
+		content.FormattedBody = html.UnescapeString(origHTML)
+		// Filter out invisible Unicode characters from HTML content too
+		content.FormattedBody = filterInvisibleUnicode(content.FormattedBody)
 	}
 
 	// Ensure body isn't empty - if we have HTML but no text, try to extract from HTML
@@ -1678,19 +1683,28 @@ func simpleHTMLToText(s string) string {
 	// Strip remaining tags
 	reTags := regexp.MustCompile(`(?is)<[^>]+>`) 
 	s = reTags.ReplaceAllString(s, "")
-	// Decode a few common HTML entities
-	replacer := strings.NewReplacer(
-		"&nbsp;", " ",
-		"&amp;", "&",
-		"&lt;", "<",
-		"&gt;", ">",
-		"&quot;", "\"",
-		"&#39;", "'",
-	)
-	s = replacer.Replace(s)
+	// Decode all HTML entities (including numeric ones like &#847; and &zwnj;)
+	s = html.UnescapeString(s)
+	// Filter out invisible/formatting Unicode characters
+	s = filterInvisibleUnicode(s)
 	// Collapse whitespace
 	s = strings.TrimSpace(collapseWhitespace(s))
 	return s
+}
+
+// filterInvisibleUnicode removes invisible Unicode characters in a single pass
+func filterInvisibleUnicode(s string) string {
+	var result strings.Builder
+	result.Grow(len(s)) // Pre-allocate capacity
+	
+	for _, r := range s {
+		// Skip format characters (Cf) and nonspacing marks (Mn) - covers most invisible chars
+		if !unicode.Is(unicode.Cf, r) && !unicode.Is(unicode.Mn, r) {
+			result.WriteRune(r)
+		}
+	}
+	
+	return result.String()
 }
 
 
