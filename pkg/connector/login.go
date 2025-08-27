@@ -117,6 +117,26 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 	// Detect email provider and give specific guidance
 	providerInfo := elp.detectEmailProvider()
 
+	// Show provider detection results to user
+	if providerInfo != nil && providerInfo.Name != "Custom Provider" {
+		// Known provider detected
+		elp.connector.Bridge.Log.Info().
+			Str("provider", providerInfo.Name).
+			Str("domain", providerInfo.Domain).
+			Msg("Known provider detected, using optimized settings")
+	} else {
+		// Unknown provider - using auto-detection fallback
+		parts := strings.Split(elp.email, "@")
+		if len(parts) == 2 {
+			domain := parts[1]
+			fallbackHost := fmt.Sprintf("imap.%s", domain)
+			elp.connector.Bridge.Log.Info().
+				Str("domain", domain).
+				Str("fallback_host", fallbackHost).
+				Msg("Unknown provider detected, attempting auto-detection")
+		}
+	}
+
 	// Test IMAP connection with helpful error messages
 	if err := elp.testIMAPConnection(ctx); err != nil {
 		// Provide provider-specific troubleshooting
@@ -399,22 +419,59 @@ func (elp *EmailLoginProcess) buildConnectionErrorMessage(err error, provider *P
 			provider.Name, provider.Name, err)
 	}
 
-	// Generic connection error
+	// Handle custom providers (auto-detection fallback) differently
+	if provider.Name == "Custom Provider" {
+		parts := strings.Split(elp.email, "@")
+		domain := "your email provider"
+		fallbackHost := "imap.domain.com"
+		if len(parts) == 2 {
+			domain = parts[1]
+			fallbackHost = fmt.Sprintf("imap.%s", domain)
+		}
+		
+		return fmt.Sprintf(`❌ **Connection Failed - Auto-Detection Used**
+
+🔍 **We attempted to connect using:** %s:993
+
+**This is an unknown email provider, so we used auto-detection.**
+
+**Possible solutions:**
+
+**1. Check with %s for correct IMAP settings:**
+• IMAP server address (might not be %s)
+• Port number (usually 993 or 143)
+• Security settings (SSL/TLS)
+• IMAP access needs to be enabled
+
+**2. Common IMAP settings to try:**
+• mail.%s:993 (SSL)
+• %s:993 (SSL)  
+• %s:143 (STARTTLS)
+
+**3. If your provider uses non-standard settings:**
+Contact your email administrator or check your provider's documentation
+
+**Original Error:** %v`,
+			fallbackHost, domain, fallbackHost, domain, fallbackHost, fallbackHost, err)
+	}
+
+	// Generic connection error for known providers
 	return fmt.Sprintf(`❌ **Connection to %s Failed**
 
 **Possible causes:**
 • Network connectivity issues
 • Firewall blocking IMAP connections
 • Email provider server temporarily unavailable
-• Incorrect IMAP server settings (auto-detection failed)
+• Account settings may need adjustment
 
 **Please try:**
 ✓ Check your internet connection
+✓ Verify IMAP is enabled in your %s account settings
 ✓ Try again in a few minutes
 ✓ Contact your email provider if the issue persists
 
 **Original Error:** %v`,
-		provider.Name, err)
+		provider.Name, provider.Name, err)
 }
 
 // IMAP monitoring is now handled by the EmailClient in client.go

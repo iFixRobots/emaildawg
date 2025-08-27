@@ -191,12 +191,20 @@ type EmailProvider struct {
 
 
 var CommonProviders = map[string]EmailProvider{
+	// Google Gmail
 	"gmail.com": {
 		Name: "Gmail",
 		Host: "imap.gmail.com",
 		Port: 993,
 		TLS:  true,
 	},
+	"googlemail.com": {
+		Name: "Gmail",
+		Host: "imap.gmail.com",
+		Port: 993,
+		TLS:  true,
+	},
+	// Microsoft Outlook/Hotmail
 	"outlook.com": {
 		Name: "Outlook",
 		Host: "outlook.office365.com",
@@ -209,18 +217,51 @@ var CommonProviders = map[string]EmailProvider{
 		Port: 993,
 		TLS:  true,
 	},
+	"live.com": {
+		Name: "Outlook",
+		Host: "outlook.office365.com",
+		Port: 993,
+		TLS:  true,
+	},
+	"msn.com": {
+		Name: "Outlook",
+		Host: "outlook.office365.com",
+		Port: 993,
+		TLS:  true,
+	},
+	// Yahoo Mail
 	"yahoo.com": {
 		Name: "Yahoo",
 		Host: "imap.mail.yahoo.com",
 		Port: 993,
 		TLS:  true,
 	},
+	"yahoo.co.uk": {
+		Name: "Yahoo",
+		Host: "imap.mail.yahoo.com",
+		Port: 993,
+		TLS:  true,
+	},
+	"yahoo.fr": {
+		Name: "Yahoo",
+		Host: "imap.mail.yahoo.com",
+		Port: 993,
+		TLS:  true,
+	},
+	"yahoo.de": {
+		Name: "Yahoo",
+		Host: "imap.mail.yahoo.com",
+		Port: 993,
+		TLS:  true,
+	},
+	// FastMail
 	"fastmail.com": {
 		Name: "FastMail",
 		Host: "imap.fastmail.com",
 		Port: 993,
 		TLS:  true,
 	},
+	// Apple iCloud
 	"icloud.com": {
 		Name: "iCloud",
 		Host: "imap.mail.me.com",
