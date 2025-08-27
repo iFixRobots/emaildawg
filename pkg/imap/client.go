@@ -221,6 +221,24 @@ var CommonProviders = map[string]EmailProvider{
 		Port: 993,
 		TLS:  true,
 	},
+	"icloud.com": {
+		Name: "iCloud",
+		Host: "imap.mail.me.com",
+		Port: 993,
+		TLS:  true,
+	},
+	"me.com": {
+		Name: "iCloud",
+		Host: "imap.mail.me.com",
+		Port: 993,
+		TLS:  true,
+	},
+	"mac.com": {
+		Name: "iCloud",
+		Host: "imap.mail.me.com",
+		Port: 993,
+		TLS:  true,
+	},
 }
 
 // getSecureTLSConfig returns a TLS configuration with security hardening
