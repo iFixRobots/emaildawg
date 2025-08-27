@@ -6,14 +6,17 @@ A Matrix–Email bridge built on mautrix bridgev2. Focused on reliable email con
 
 This project is usable and under active development. Core features work and the bridge is suitable for personal use and small deployments.
 
-## Features
+## What this bridge does for you
 
-- Email login with provider auto-detection
-- IMAP processing with attachments
-- Email threading and participant mapping
-- Matrix room creation with read-only policy for users
-- Participant change notices (join/leave based on headers)
-- Docker and Bridge Manager support
+- **Easy setup:** Just give it your email and password (or app password) and it figures out the server settings
+- **Real-time email delivery:** New emails show up in Matrix immediately - no waiting or manual syncing
+- **Handles attachments:** Photos, PDFs, documents all get uploaded to Matrix automatically  
+- **Smart conversation threading:** Emails in the same thread become one Matrix room
+- **Monitors both folders:** Watches your inbox AND sent folder, so you see both sides of conversations
+- **Reliable connections:** Automatically reconnects if your internet hiccups or email server has issues
+- **Cleans up messy emails:** Filters out tracking pixels and tiny placeholder images that clutter your conversations
+- **Secure storage:** Your email credentials are encrypted on your machine
+- **Read-only Matrix rooms:** Other Matrix users can see the emails but can't accidentally send replies through the bridge
 
 ## Architecture
 
@@ -26,30 +29,52 @@ This project is usable and under active development. Core features work and the 
 
 You can run EmailDawg in two supported ways. Pick one and follow it end-to-end.
 
-### A) With Beeper Bridge Manager (recommended for Beeper)
-Prerequisites:
-- bbctl installed and logged in: `bbctl login`
-- Go 1.22+ and libolm installed (for building this bridge)
+### A) With Beeper Bridge Manager (recommended for Beeper users)
 
-Steps:
-```bash
-# Get the source and build
-git clone https://github.com/iFixRobots/emaildawg
-cd emaildawg
-./setup.sh
+This is the easiest way if you're already using Beeper's bridge system.
 
-# Edit the generated config if needed
-sed -n '1,160p' ./data/config.yaml
+**What you need first:**
+- Beeper Bridge Manager installed and logged in: `bbctl login`
+- Go 1.22+ and libolm on your system
 
-# Run the bridge using the local binary and the bbctl-generated config
-./emaildawg --config ./data/config.yaml
-```
-Notes:
-- setup.sh builds the bridge and generates a bridgev2 config at ./data/config.yaml using `bbctl config` so it matches Bridge Manager conventions (hungry websocket, encryption defaults, double puppeting secrets, etc.).
-- No registration.yaml is required when using Beeper’s appservice websocket (the default in the generated config).
-- To run the bridge under a process manager, point it to `./emaildawg --config ./data/config.yaml`.
-- bbctl is only used to generate the config and manage Beeper auth. It does not run this bridge; start it yourself using the local binary or Docker.
-- Important: Use the generic bridgev2 template with a custom bridge name. Run `bbctl config --type bridgev2 --output ./data/config.yaml sh-emaildawg-local`. Do not use a per-bridge name unless it’s officially supported by your bbctl build.
+**Step-by-step setup:**
+
+1. **Get the code and run setup:**
+   ```bash
+   git clone https://github.com/iFixRobots/emaildawg
+   cd emaildawg
+   ./setup.sh
+   ```
+   
+2. **What setup.sh does:**
+   - Installs libolm if you're on macOS and don't have it
+   - Builds the bridge binary (creates `./emaildawg`)
+   - Creates a `./data/` folder in your project directory
+   - Asks you for a bridge name (just pick something like `my-email-bridge` - this is NOT your email address)
+   - Uses bbctl to generate `./data/config.yaml` with Beeper's websocket settings
+
+3. **Important: setup.sh does NOT configure your email accounts**
+   The config file it creates connects to Beeper's infrastructure, but you'll add your actual email accounts later using bot commands.
+
+4. **Start the bridge:**
+   ```bash
+   ./emaildawg --config ./data/config.yaml
+   ```
+
+5. **Add your email account:**
+   - Find the bot in your Matrix client
+   - Send it: `!email login`
+   - Follow the guided setup for your Gmail/Yahoo/Outlook account
+
+**Where things are stored:**
+- **Config file:** `./data/config.yaml` (in your emaildawg folder)
+- **Database:** `./data/emaildawg.db` (created when you first add an email account)
+- **Logs:** `./logs/bridge.log` (created when the bridge starts)
+
+**If something goes wrong:**
+- Check the logs in your emaildawg folder at `./logs/bridge.log`
+- Make sure bbctl is logged in: `bbctl whoami`
+- The bridge name you picked doesn't matter - it's just an identifier for bbctl
 
 ### B) Standalone (no Bridge Manager)
 Prerequisites:
@@ -97,40 +122,68 @@ Initial setup (summary):
 3. If using a standard homeserver over HTTP appservice, generate and register registration.yaml with your homeserver.
 4. Start the bridge.
 
-User commands (send in DM to the bot):
-- `!email login` — Add an email account (guided)
-- `!email list` — List configured accounts
-- `!email logout` — Remove an account
-- `!email status` — Show connection status
-- `!email ping` — Health check
+## Using the Bridge
+
+Once your bridge is running, send these commands in a DM to the bot:
+
+### Getting Started
+- `!email login` — Connect your email account (walks you through the setup)
+- `!email login email:you@gmail.com password:yourapppassword` — Quick setup if you know your details
+- `!email help` — Show available commands and help
+
+### Managing Your Accounts  
+- `!email list` — See all your connected email accounts and their status
+- `!email logout` — Disconnect all email accounts
+- `!email logout you@gmail.com` — Disconnect just one specific account
+- `!email status` — Check if everything's working (connection health, monitoring status)
+
+### Troubleshooting
+- `!email sync` — Force check for new emails on all accounts
+- `!email sync you@gmail.com` — Force sync just one account
+- `!email reconnect` — Fix connection issues for all accounts
+- `!email reconnect you@gmail.com` — Reconnect just one account
+- `!email ping` — Basic bridge health check
+
+### Advanced
+- `!email passphrase` — Manage the password that encrypts your email credentials
+- `!email passphrase generate` — Create a new secure encryption password
 
 Deployment-specific paths:
 - Docker Compose: place config.yaml in the project root; compose mounts it read-only into the container. registration.yaml is only needed for HTTP appservice mode.
 - Bridge Manager: setup.sh writes ./data/config.yaml; run the binary with `--config ./data/config.yaml`.
 
-### Database configuration (IMPORTANT)
-The bridge needs a persistent database path. If you use SQLite (default), set the database URI to the data folder used by your deployment mode.
+### Database setup (where your data gets stored)
 
-Docker Compose (distroless nonroot):
+The bridge needs somewhere to store your email account info and message history. Most people can use the default SQLite setup.
+
+**If you used setup.sh (Bridge Manager setup):**
+Your config is already set up correctly. The database will be created at `./data/emaildawg.db` in your emaildawg folder.
+
+**If you're doing Docker Compose:**
+Use this in your config.yaml:
 ```yaml
-# config.yaml (bridgev2)
 database:
   type: sqlite3
   uri: "file:/home/nonroot/app/data/emaildawg.db?_fk=1"
 ```
+This tells the bridge to store data in the Docker volume we set up.
 
-Host/manual (runs in repo working directory):
+**If you're running manually without Bridge Manager:**
+Use this in your config.yaml:
 ```yaml
-# config.yaml (bridgev2)
 database:
   type: sqlite3
   uri: "file:./data/emaildawg.db?_fk=1"
 ```
+This creates the database file in a `data` folder next to your bridge.
 
-Notes:
-- The container data directory is /home/nonroot/app/data (a named volume). Do not point the URI to /opt/emaildawg.
-- The host data directory is ./data. Ensure it exists and is writable.
-- For Postgres, set type: postgres and provide a proper DSN instead of sqlite3.
+**Want to use PostgreSQL instead?**
+```yaml
+database:
+  type: postgres
+  uri: "postgresql://username:password@localhost/emaildawg_db?sslmode=require"
+```
+Replace the connection details with your actual Postgres server info.
 
 ## Security and runtime notes
 - Never build or run with nocrypto. libolm is required for proper E2EE support.
@@ -138,14 +191,31 @@ Notes:
 
 ## Email provider support
 
-Auto-configured providers:
-- Gmail (app password)
-- Yahoo (app password)
-- Outlook/Hotmail (app password)
-- iCloud (app password)
-- Custom IMAP (auto-detected settings)
+The bridge automatically detects and configures settings for these providers:
 
-App password setup guidance is provided during login.
+### Major Providers (App Password Required)
+- **Gmail:** gmail.com, googlemail.com  
+- **Yahoo:** yahoo.com, yahoo.co.uk, yahoo.fr, yahoo.de
+- **Microsoft:** outlook.com, hotmail.com, live.com, msn.com
+- **Apple iCloud:** icloud.com, me.com, mac.com
+
+### Other Supported Providers
+- **FastMail:** fastmail.com
+
+### Unknown Providers
+For email providers not in the list above, the bridge will:
+- Try to auto-detect your IMAP settings (usually works)
+- Show you exactly what server it's trying to connect to
+- Give helpful troubleshooting tips if the connection fails
+- Suggest common IMAP server patterns your provider might use
+
+**About App Passwords:**
+Most major email providers require you to generate a special "App Password" instead of using your regular login password. The bridge will guide you through this during setup and provide links to the right settings pages.
+
+**The bridge tells you what's happening:**
+- When it recognizes your email provider and uses optimized settings
+- When it's trying to auto-detect settings for an unknown provider
+- Exactly which server and port it's attempting to connect to
 
 ## How it works
 
