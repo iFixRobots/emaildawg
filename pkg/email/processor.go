@@ -582,6 +582,20 @@ mr := multipart.NewReader(body, boundary)
 			}
 		}
 
+		// Filter out tiny placeholder/spacer images for inline images only
+		if isInlineReference && strings.HasPrefix(strings.ToLower(mediaType), "image/") {
+			// Skip images under 1KB - these are typically spacers/placeholders
+			if len(dataBytes) < 1024 {
+				p.log.Debug().
+					Str("filename", filename).
+					Str("content_type", ct).
+					Int("size", len(dataBytes)).
+					Str("cid", contentID).
+					Msg("Filtered out placeholder image (< 1KB)")
+				continue
+			}
+		}
+
 		// Default filename if still empty
 		if filename == "" {
 			filename = "attachment"
