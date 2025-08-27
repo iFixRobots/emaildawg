@@ -8,15 +8,15 @@ This project is usable and under active development. Core features work and the 
 
 ## What this bridge does for you
 
-- **Easy setup:** Just give it your email and password (or app password) and it figures out the server settings
+- **Easy setup:** Just give it your email and app password and it figures out the server settings
 - **Real-time email delivery:** New emails show up in Matrix immediately - no waiting or manual syncing
 - **Handles attachments:** Photos, PDFs, documents all get uploaded to Matrix automatically  
-- **Smart conversation threading:** Emails in the same thread become one Matrix room
+- **Smart conversation threading:** Emails in the same thread become one chat
 - **Monitors both folders:** Watches your inbox AND sent folder, so you see both sides of conversations
 - **Reliable connections:** Automatically reconnects if your internet hiccups or email server has issues
 - **Cleans up messy emails:** Filters out tracking pixels and tiny placeholder images that clutter your conversations
 - **Secure storage:** Your email credentials are encrypted on your machine
-- **Read-only Matrix rooms:** Other Matrix users can see the emails but can't accidentally send replies through the bridge
+- **Read-only rooms:** You can see the emails but can't accidentally send replies through the bridge
 
 ## Architecture
 
@@ -62,9 +62,9 @@ This is the easiest way if you're already using Beeper's bridge system.
    ```
 
 5. **Add your email account:**
-   - Find the bot in your Matrix client
+   - Find the bot in your Matrix client (in Beeper, you can go to Settings -> Accounts -> Bridges (under Self-hosted bridges), youremailbridgename here -> Create a bot room)
    - Send it: `!email login`
-   - Follow the guided setup for your Gmail/Yahoo/Outlook account
+   - Follow the guided setup for your Email account
 
 **Where things are stored:**
 - **Config file:** `./data/config.yaml` (in your emaildawg folder)
@@ -152,38 +152,29 @@ Deployment-specific paths:
 - Docker Compose: place config.yaml in the project root; compose mounts it read-only into the container. registration.yaml is only needed for HTTP appservice mode.
 - Bridge Manager: setup.sh writes ./data/config.yaml; run the binary with `--config ./data/config.yaml`.
 
-### Database setup (where your data gets stored)
+### Database configuration (IMPORTANT)
+The bridge needs a persistent database path. If you use SQLite (default), set the database URI to the data folder used by your deployment mode.
 
-The bridge needs somewhere to store your email account info and message history. Most people can use the default SQLite setup.
-
-**If you used setup.sh (Bridge Manager setup):**
-Your config is already set up correctly. The database will be created at `./data/emaildawg.db` in your emaildawg folder.
-
-**If you're doing Docker Compose:**
-Use this in your config.yaml:
+Docker Compose (distroless nonroot):
 ```yaml
+# config.yaml (bridgev2)
 database:
   type: sqlite3
   uri: "file:/home/nonroot/app/data/emaildawg.db?_fk=1"
 ```
-This tells the bridge to store data in the Docker volume we set up.
 
-**If you're running manually without Bridge Manager:**
-Use this in your config.yaml:
+Host/manual (runs in repo working directory):
 ```yaml
+# config.yaml (bridgev2)
 database:
   type: sqlite3
   uri: "file:./data/emaildawg.db?_fk=1"
 ```
-This creates the database file in a `data` folder next to your bridge.
 
-**Want to use PostgreSQL instead?**
-```yaml
-database:
-  type: postgres
-  uri: "postgresql://username:password@localhost/emaildawg_db?sslmode=require"
-```
-Replace the connection details with your actual Postgres server info.
+Notes:
+- The container data directory is /home/nonroot/app/data (a named volume). Do not point the URI to /opt/emaildawg.
+- The host data directory is ./data. Ensure it exists and is writable.
+- For Postgres, set type: postgres and provide a proper DSN instead of sqlite3.
 
 ## Security and runtime notes
 - Never build or run with nocrypto. libolm is required for proper E2EE support.
