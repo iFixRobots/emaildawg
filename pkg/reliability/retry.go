@@ -40,6 +40,17 @@ func NetworkRetryConfig() RetryConfig {
 	}
 }
 
+// IDLEStartupRetryConfig returns retry config optimized for IMAP IDLE startup operations
+func IDLEStartupRetryConfig() RetryConfig {
+	return RetryConfig{
+		MaxAttempts:   3,  // Limited attempts to prevent endless loops
+		InitialDelay:  500 * time.Millisecond,
+		MaxDelay:      5 * time.Second,
+		BackoffFactor: 2.0,
+		Jitter:        true,
+	}
+}
+
 // RetryWithBackoff retries a function with exponential backoff and smart error categorization
 func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) error {
 	// Validate config parameters to prevent runtime issues
@@ -202,6 +213,9 @@ func IsRetryableError(err error) bool {
 		"server temporarily unavailable",  // Full phrase match
 		"temporary failure in name resolution", // DNS issues
 		"mailbox unavailable",             // Mailbox locked/busy
+		"idle already",                    // IDLE command already running
+		"already running",                 // Generic already running state
+		"idle command already",            // IDLE command already in progress
 	}
 	
 	// Use more specific matching for IMAP patterns
