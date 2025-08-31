@@ -165,8 +165,44 @@ type ParsedEmail struct {
 }
 
 
+// isForwardedMessage checks if an email is a forward based on subject and content
+func isForwardedMessage(email *ParsedEmail) bool {
+	if email == nil {
+		return false
+	}
+	
+	// Check subject for forward prefixes
+	subject := strings.ToLower(strings.TrimSpace(email.Subject))
+	forwardPrefixes := []string{"fwd:", "fw:", "forward:"}
+	for _, prefix := range forwardPrefixes {
+		if strings.HasPrefix(subject, prefix) {
+			return true
+		}
+	}
+	
+	// Check body content for forward markers (reuse existing logic)
+	content := strings.ToLower(email.TextContent + " " + email.HTMLContent)
+	forwardMarkers := []string{
+		"-----original message-----",
+		"begin forwarded message",
+		"forwarded message",
+		"---------- forwarded message ----------",
+	}
+	for _, marker := range forwardMarkers {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	
+	return false
+}
+
 // DetermineThread analyzes an email and determines which thread it belongs to
 func (tm *ThreadManager) DetermineThread(receiver string, email *ParsedEmail) *EmailThread {
+	// Forwarded emails always create new threads to avoid contaminating existing conversations
+	if isForwardedMessage(email) {
+		return tm.createNewThread(email)
+	}
 	// Step 0a: Consult external resolver if available
 	if tm.resolver != nil {
 		if email.InReplyTo != "" {
