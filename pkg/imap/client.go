@@ -442,7 +442,7 @@ func NewClient(email, username, password string, overrides *ConnectionOverrides,
 		idleInterval:           30 * time.Second,
 		firstIdleCycle:         true,
 		// Mailbox management
-		sentFolder: detectSentFolderForProvider(domain),
+		sentFolder: detectSentFolder(domain, host),
 		// In-flight maps
 		inFlightInbox: make(map[imap.UID]struct{}),
 		inFlightSent:  make(map[imap.UID]struct{}),
@@ -1813,9 +1813,21 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 	}
 }
 
-// detectSentFolderForProvider returns a best-effort Sent folder name for a domain.
-func detectSentFolderForProvider(domain string) string {
+// detectSentFolder returns a best-effort Sent folder name based on domain and host.
+func detectSentFolder(domain, host string) string {
 	d := strings.ToLower(strings.TrimSpace(domain))
+	h := strings.ToLower(strings.TrimSpace(host))
+
+	// Prefer explicit host-based detection to support custom domains on hosted providers.
+	switch {
+	case strings.Contains(h, "gmail.com") || strings.Contains(h, "googlemail.com"):
+		return "[Gmail]/Sent Mail"
+	case strings.Contains(h, "outlook.office365.com") || strings.Contains(h, "office365.com"):
+		return "Sent Items"
+	case strings.Contains(h, "fastmail.com"):
+		return "Sent"
+	}
+
 	switch d {
 	case "gmail.com", "googlemail.com":
 		return "[Gmail]/Sent Mail"
