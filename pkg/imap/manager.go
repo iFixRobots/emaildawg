@@ -76,7 +76,7 @@ func (m *Manager) AddAccount(login *bridgev2.UserLogin, email, username, passwor
 	logger := m.log.With().
 		Str("user", login.UserMXID.String()).
 		Str("email", email).Logger()
-client, err := NewClient(email, username, password, login, &logger, m.sanitized, m.secret, 180, 25, 3, nil)
+client, err := NewClient(email, username, password, nil, login, &logger, m.sanitized, m.secret, 180, 25, 3, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}

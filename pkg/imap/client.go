@@ -48,7 +48,7 @@ type IMAPDebugWriter struct {
 // Write implements io.Writer to log IMAP protocol messages
 func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 	data := string(p)
-	
+
 	// Redact credentials from various authentication commands
 	if w.containsCredentials(data) {
 		w.logger.Trace().Str("imap_data", "[AUTHENTICATION COMMAND - credentials redacted]").Msg("[IMAP PROTOCOL] Client -> Server")
@@ -60,21 +60,21 @@ func (w *IMAPDebugWriter) Write(p []byte) (n int, err error) {
 			w.logger.Trace().Str("imap_data", strings.TrimSpace(data)).Msg("[IMAP PROTOCOL] Data exchange")
 		}
 	}
-	
+
 	return len(p), nil
 }
 
 // containsCredentials checks if the IMAP data contains authentication credentials
 func (w *IMAPDebugWriter) containsCredentials(data string) bool {
 	dataUpper := strings.ToUpper(data)
-	
+
 	// Check for various authentication commands that contain credentials
 	authCommands := []string{
-		"LOGIN",           // Basic LOGIN command
-		"AUTHENTICATE",    // AUTHENTICATE command (OAuth, PLAIN, etc)
-		"APPEND",          // APPEND with AUTH= parameter can contain credentials
+		"LOGIN",        // Basic LOGIN command
+		"AUTHENTICATE", // AUTHENTICATE command (OAuth, PLAIN, etc)
+		"APPEND",       // APPEND with AUTH= parameter can contain credentials
 	}
-	
+
 	for _, cmd := range authCommands {
 		if strings.Contains(dataUpper, cmd) {
 			// For LOGIN and AUTHENTICATE, if it contains the command, redact it
@@ -87,13 +87,13 @@ func (w *IMAPDebugWriter) containsCredentials(data string) bool {
 			}
 		}
 	}
-	
+
 	// Also check for base64 encoded credentials (common in OAuth/SASL)
 	// Look for suspiciously long base64-like strings that might be tokens
 	if strings.Contains(dataUpper, "SASL") || strings.Contains(dataUpper, "OAUTH") {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -117,13 +117,13 @@ type Client struct {
 	secret    string
 
 	// INBOX IMAP client
-	client     *imapclient.Client
-	connected  bool
-	idling     bool
-	stopIdle   chan struct{}
-	stopIdleOnce sync.Once  // Ensures stopIdle is closed only once
-	reconnect  chan struct{}
-	
+	client       *imapclient.Client
+	connected    bool
+	idling       bool
+	stopIdle     chan struct{}
+	stopIdleOnce sync.Once // Ensures stopIdle is closed only once
+	reconnect    chan struct{}
+
 	// SENT IMAP client (second TCP connection)
 	sentClient       *imapclient.Client
 	sentConnected    bool
@@ -132,18 +132,18 @@ type Client struct {
 	sentMu           sync.RWMutex
 	sentFailureCount int
 	sentLastFailure  time.Time
-	
+
 	// Startup behavior
-	startupBackfillSeconds   int
-	startupBackfillMax       int
-	initialIdleTimeout       time.Duration
-	idleInterval             time.Duration
-	firstIdleCycle           bool
+	startupBackfillSeconds int
+	startupBackfillMax     int
+	initialIdleTimeout     time.Duration
+	idleInterval           time.Duration
+	firstIdleCycle         bool
 
 	// Mailbox management
 	sentFolder string
-	 
- 	// Bridge integration
+
+	// Bridge integration
 	login            *bridgev2.UserLogin // Can be nil for testing
 	log              *zerolog.Logger
 	processor        *email.Processor
@@ -156,7 +156,7 @@ type Client struct {
 	// In-flight UID de-duplication per mailbox
 	inFlightInbox map[imap.UID]struct{}
 	inFlightSent  map[imap.UID]struct{}
-	
+
 	// Circuit breaker for connection failures
 	circuitBreaker *reliability.CircuitBreaker
 	retryConfig    reliability.RetryConfig
@@ -166,12 +166,12 @@ type Client struct {
 	lastStateEvent status.BridgeStateEvent
 	lastStateError status.BridgeStateErrorCode
 	lastStateTime  time.Time
-	
+
 	// Resource management
 	ctx        context.Context
 	cancel     context.CancelFunc
 	isShutdown bool
-	
+
 	// Connection state tracking to prevent multiple connections
 	connectingMu sync.Mutex
 	isConnecting bool
@@ -182,13 +182,20 @@ type Client struct {
 
 // EmailProvider represents common email provider configurations
 type EmailProvider struct {
-	Name     string
-	Host     string
-	Port     int
-	TLS      bool
-	OAuth    bool
+	Name  string
+	Host  string
+	Port  int
+	TLS   bool
+	OAuth bool
 }
 
+// ConnectionOverrides allow callers to explicitly set IMAP server details.
+// Any zero-value field is ignored and the auto-detected value is used instead.
+type ConnectionOverrides struct {
+	Host string
+	Port int
+	TLS  *bool
+}
 
 var CommonProviders = map[string]EmailProvider{
 	// Google Gmail
@@ -213,7 +220,7 @@ var CommonProviders = map[string]EmailProvider{
 	},
 	"hotmail.com": {
 		Name: "Outlook",
-		Host: "outlook.office365.com", 
+		Host: "outlook.office365.com",
 		Port: 993,
 		TLS:  true,
 	},
@@ -310,52 +317,77 @@ func getSecureTLSConfig(serverName string) *tls.Config {
 }
 
 // NewClient creates a new IMAP client for the given email account
-func NewClient(email, username, password string, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string, backfillSeconds int, backfillMax int, initialIdleTimeoutSeconds int, stateCoord StateCoordinator) (*Client, error) {
+func NewClient(email, username, password string, overrides *ConnectionOverrides, login *bridgev2.UserLogin, log *zerolog.Logger, sanitized bool, secret string, backfillSeconds int, backfillMax int, initialIdleTimeoutSeconds int, stateCoord StateCoordinator) (*Client, error) {
 	// Auto-detect provider settings
 	domain := strings.ToLower(strings.Split(email, "@")[1])
 	provider, ok := CommonProviders[domain]
-	
+
 	var host string
 	var port int
 	var useTLS bool
-	
+	var providerName string
+
 	if ok {
 		host = provider.Host
 		port = provider.Port
 		useTLS = provider.TLS
-		// SECURE LOGGING: No passwords logged
-		log.Info().Str("provider", provider.Name).Str("host", host).Int("port", port).Str("email", email).Msg("Auto-detected email provider")
+		providerName = provider.Name
 	} else {
 		// Default IMAP settings for unknown providers
 		host = fmt.Sprintf("imap.%s", domain)
 		port = 993
 		useTLS = true
-		log.Warn().Str("domain", domain).Str("email", email).Msg("Unknown provider, using default IMAP settings")
+		providerName = "auto"
+	}
+
+	appliedOverride := false
+	if overrides != nil {
+		if trimmedHost := strings.TrimSpace(overrides.Host); trimmedHost != "" {
+			host = trimmedHost
+			appliedOverride = true
+		}
+		if overrides.Port > 0 {
+			port = overrides.Port
+			appliedOverride = true
+		}
+		if overrides.TLS != nil {
+			useTLS = *overrides.TLS
+			appliedOverride = true
+		}
+	}
+
+	if appliedOverride {
+		log.Info().Str("email", email).Str("host", host).Int("port", port).Bool("tls", useTLS).Msg("Using custom IMAP server settings")
+	} else if ok {
+		// SECURE LOGGING: No passwords logged
+		log.Info().Str("provider", providerName).Str("host", host).Int("port", port).Str("email", email).Msg("Auto-detected email provider")
+	} else {
+		log.Warn().Str("domain", domain).Str("email", email).Str("host", host).Int("port", port).Bool("tls", useTLS).Msg("Unknown provider, using default IMAP settings")
 	}
 
 	// Create context for proper cancellation
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	// Derive timeouts
 	initIdle := 30 * time.Second
 	if initialIdleTimeoutSeconds > 0 {
 		initIdle = time.Duration(initialIdleTimeoutSeconds) * time.Second
 	}
 	return &Client{
-		Email:        email,
-		Host:         host,
-		Port:         port,
-		Username:     username,
-		Password:     password, // Never logged
-		TLS:          useTLS,
+		Email:            email,
+		Host:             host,
+		Port:             port,
+		Username:         username,
+		Password:         password, // Never logged
+		TLS:              useTLS,
 		login:            login,
 		log:              log,
 		sanitized:        sanitized,
 		secret:           secret,
 		stateCoordinator: stateCoord, // Can be nil for watchdog clients
-		stopIdle:     make(chan struct{}),
-		stopIdleOnce: sync.Once{},
-		reconnect:    make(chan struct{}, 1),
+		stopIdle:         make(chan struct{}),
+		stopIdleOnce:     sync.Once{},
+		reconnect:        make(chan struct{}, 1),
 		// Reliability components - handle error from NewCircuitBreaker
 		circuitBreaker: func() *reliability.CircuitBreaker {
 			cb, err := reliability.NewCircuitBreaker(5, 2*time.Minute)
@@ -364,7 +396,7 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 				log.Error().Err(err).Msg("Failed to create circuit breaker")
 				return nil
 			}
-			
+
 			// Register state change callback if state coordinator available
 			if stateCoord != nil {
 				cb.SetStateChangeCallback(func(oldState, newState reliability.CircuitBreakerState) {
@@ -372,7 +404,7 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 					var event string
 					var connected bool
 					var errorCode status.BridgeStateErrorCode
-					
+
 					switch newState {
 					case reliability.StateClosed:
 						event = string(coordinator.EventCircuitClosed)
@@ -387,7 +419,7 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 						connected = false
 						errorCode = EmailCircuitOpen
 					}
-					
+
 					stateCoord.ReportSimpleEvent("circuit_breaker", event, connected, errorCode, map[string]any{
 						"old_state": oldState.String(),
 						"new_state": newState.String(),
@@ -395,14 +427,14 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 					})
 				})
 			}
-			
+
 			return cb
 		}(),
-		retryConfig:    reliability.NetworkRetryConfig(),
-		timeoutConfig:  reliability.IMAPTimeouts(),
+		retryConfig:   reliability.NetworkRetryConfig(),
+		timeoutConfig: reliability.IMAPTimeouts(),
 		// Context management
-		ctx:          ctx,
-		cancel:       cancel,
+		ctx:    ctx,
+		cancel: cancel,
 		// Startup behavior
 		startupBackfillSeconds: backfillSeconds,
 		startupBackfillMax:     backfillMax,
@@ -410,10 +442,10 @@ func NewClient(email, username, password string, login *bridgev2.UserLogin, log 
 		idleInterval:           30 * time.Second,
 		firstIdleCycle:         true,
 		// Mailbox management
-		sentFolder:             detectSentFolderForProvider(domain),
+		sentFolder: detectSentFolderForProvider(domain),
 		// In-flight maps
-		inFlightInbox:          make(map[imap.UID]struct{}),
-		inFlightSent:           make(map[imap.UID]struct{}),
+		inFlightInbox: make(map[imap.UID]struct{}),
+		inFlightSent:  make(map[imap.UID]struct{}),
 	}, nil
 }
 
@@ -422,7 +454,7 @@ func (c *Client) Connect() error {
 	// Prevent concurrent connection attempts
 	c.connectingMu.Lock()
 	defer c.connectingMu.Unlock()
-	
+
 	if c.isConnecting {
 		return fmt.Errorf("connection already in progress")
 	}
@@ -445,7 +477,7 @@ func (c *Client) connectInternal() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-// If we think we're connected, validate liveness before early return
+	// If we think we're connected, validate liveness before early return
 	if c.connected {
 		if err := c.testConnectionNoLock(); err != nil {
 			c.log.Warn().Err(err).Msg("Detected dead IMAP connection during Connect - resetting state")
@@ -464,7 +496,7 @@ func (c *Client) connectInternal() error {
 	// Ensure clean state before connecting
 	c.idling = false
 	c.connected = false
-	
+
 	c.log.Info().Str("host", c.Host).Int("port", c.Port).Bool("tls", c.TLS).Msg("Connecting to IMAP server")
 
 	// Create network connection with timeout
@@ -498,38 +530,38 @@ func (c *Client) connectInternal() error {
 	// Authenticate with timeout and proper cleanup
 	loginCtx, loginCancel := context.WithTimeout(c.ctx, c.timeoutConfig.Command)
 	defer loginCancel()
-	
+
 	loginErr := make(chan error, 1)
 	go func() {
 		defer common.RecoverToError(loginErr)
-		
+
 		// Execute login with context awareness
 		cmd := c.client.Login(c.Username, c.Password)
 		done := make(chan error, 1)
 		go func() {
 			done <- cmd.Wait()
 		}()
-		
+
 		select {
 		case err := <-done:
 			loginErr <- err
 		case <-loginCtx.Done():
-			// Context cancelled. The buffered 'done' channel will not block the 
+			// Context cancelled. The buffered 'done' channel will not block the
 			// cmd.Wait() goroutine, so no explicit draining is needed.
 			loginErr <- loginCtx.Err()
 		}
 	}()
-	
+
 	select {
 	case err := <-loginErr:
 		if err != nil {
-			// Handle timeout specifically 
+			// Handle timeout specifically
 			if errors.Is(err, context.DeadlineExceeded) {
 				c.log.Error().Msg("IMAP authentication timed out")
 				conn.Close()
 				return fmt.Errorf("IMAP login timed out after %v", c.timeoutConfig.Command)
 			}
-			
+
 			if c.sanitized {
 				c.log.Error().Err(err).Str("username_masked", logging.MaskEmail(c.Username)).Msg("IMAP authentication failed")
 			} else {
@@ -547,7 +579,7 @@ func (c *Client) connectInternal() error {
 
 	c.connected = true
 	c.log.Info().Msg("Successfully connected to IMAP server")
-	
+
 	// Report INBOX connection success
 	if c.stateCoordinator != nil {
 		c.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventConnectionEstablished), true, "", nil)
@@ -582,7 +614,7 @@ func (c *Client) Disconnect() error {
 		done := make(chan error, 1)
 		logoutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		
+
 		go func() {
 			defer cancel() // Ensure context is cancelled when goroutine completes
 			if err := c.client.Logout().Wait(); err != nil {
@@ -591,7 +623,7 @@ func (c *Client) Disconnect() error {
 			}
 			done <- nil
 		}()
-		
+
 		select {
 		case err := <-done:
 			if err != nil {
@@ -601,7 +633,7 @@ func (c *Client) Disconnect() error {
 			c.log.Warn().Msg("IMAP logout timed out, force closing connection")
 			// The goroutine will exit when it tries to send to done channel
 		}
-		
+
 		// Always force close to ensure connection is cleaned up
 		c.client.Close()
 		c.client = nil
@@ -609,7 +641,7 @@ func (c *Client) Disconnect() error {
 
 	c.connected = false
 	c.log.Info().Msg("Disconnected from IMAP server (INBOX)")
-	
+
 	// Report INBOX connection closure
 	if c.stateCoordinator != nil {
 		c.stateCoordinator.ReportSimpleEvent("inbox", "connection_closed", false, "", nil)
@@ -619,7 +651,11 @@ func (c *Client) Disconnect() error {
 	c.sentMu.Lock()
 	if c.sentClient != nil {
 		if c.sentStop != nil {
-			select { case <-c.sentStop: default: close(c.sentStop) }
+			select {
+			case <-c.sentStop:
+			default:
+				close(c.sentStop)
+			}
 		}
 		c.sentClient.Close()
 		c.sentClient = nil
@@ -630,14 +666,14 @@ func (c *Client) Disconnect() error {
 		}
 	}
 	c.sentMu.Unlock()
-	
+
 	return nil
 }
 
 // StartIDLE begins IMAP IDLE monitoring for real-time email delivery
 func (c *Client) StartIDLE() (err error) {
 	c.mu.Lock()
-	
+
 	// Check if already idling to prevent concurrent IDLE attempts
 	if c.idling {
 		c.mu.Unlock()
@@ -647,7 +683,7 @@ func (c *Client) StartIDLE() (err error) {
 		c.mu.Unlock()
 		return fmt.Errorf("not connected to IMAP server")
 	}
-	
+
 	// Create a fresh stop channel for this IDLE session
 	c.stopIdle = make(chan struct{})
 	c.stopIdleOnce = sync.Once{} // Reset the Once so the new channel can be closed
@@ -661,7 +697,7 @@ func (c *Client) StartIDLE() (err error) {
 			c.mu.Unlock()
 		}
 	}()
-	
+
 	// Get a local reference to the client while protected by mutex
 	client := c.client
 	c.mu.Unlock()
@@ -690,7 +726,7 @@ func (c *Client) StartIDLE() (err error) {
 		}
 		return fmt.Errorf("failed to test IDLE capability: %w", err)
 	}
-	
+
 	// Immediately close the test IDLE and start the actual monitoring loop
 	if err := testIdleCmd.Close(); err != nil {
 		c.log.Warn().Err(err).Msg("Failed to close test IDLE command")
@@ -719,12 +755,12 @@ func (c *Client) StopIDLE() {
 	}
 
 	c.log.Info().Msg("Stopping IMAP IDLE monitoring")
-	
+
 	// Safely close channel only once using sync.Once
 	c.stopIdleOnce.Do(func() {
 		close(c.stopIdle)
 	})
-	
+
 	// Do NOT recreate stopIdle here to avoid losing the stop signal in the running goroutine
 	c.idling = false
 }
@@ -766,12 +802,12 @@ func (c *Client) idleLoop() {
 		default:
 			if err := c.runIDLE(); err != nil {
 				c.log.Error().Err(err).Msg("IDLE failed, attempting recovery through circuit breaker")
-				
+
 				// Report IDLE failure for recovery
 				if c.stateCoordinator != nil {
 					c.stateCoordinator.ReportSimpleEvent("inbox", string(coordinator.EventIdleFailed), false, EmailIdleFailed, map[string]any{"reason": "idle_failed", "source": "network"})
 				}
-				
+
 				// Use circuit breaker and retry logic instead of crude sleep
 				recoveryErr := c.performIDLERecovery()
 				if recoveryErr != nil {
@@ -779,7 +815,7 @@ func (c *Client) idleLoop() {
 					// Circuit breaker handles timing - continue immediately to check state
 					continue
 				}
-				
+
 				c.log.Info().Msg("IDLE recovery successful")
 				// Report IDLE recovery success
 				if c.stateCoordinator != nil {
@@ -805,7 +841,7 @@ func (c *Client) runIDLE() error {
 	}
 
 	// Create IDLE command
-idleCmd, err := cli.Idle()
+	idleCmd, err := cli.Idle()
 	if err != nil {
 		// If IDLE fails due to "already running", this indicates server-side state desync
 		// Force a reconnection to clean up the connection state
@@ -833,7 +869,7 @@ idleCmd, err := cli.Idle()
 	// The real issue: idleCmd.Wait() hangs instead of returning on server notifications
 	// Solution: Use a timeout-based approach that periodically checks for new messages
 	// This gives us responsiveness while still using IDLE properly
-	
+
 	cycleTimeout := c.idleInterval
 	if c.firstIdleCycle && c.initialIdleTimeout > 0 {
 		cycleTimeout = c.initialIdleTimeout
@@ -848,23 +884,23 @@ idleCmd, err := cli.Idle()
 			c.log.Debug().Msg("IDLE stop signal received")
 			idleCmd.Close()
 			return nil
-			
+
 		case <-timeoutTimer.C:
 			c.log.Debug().Msg("IDLE timeout reached, checking for messages and restarting")
 			// Close current IDLE session and wait for it to complete
 			if err := idleCmd.Close(); err != nil {
 				c.log.Warn().Err(err).Msg("Error closing IDLE command")
 			}
-			
+
 			// Wait a moment for server to process IDLE termination
 			// This prevents "UID SEARCH not allowed now" errors
 			time.Sleep(100 * time.Millisecond)
-			
+
 			// Check for new messages
 			if err := c.CheckNewMessages(); err != nil {
 				c.log.Error().Err(err).Msg("Error checking new messages on IDLE timeout")
 			}
-			
+
 			// Restart IDLE for next cycle
 			return nil // This will cause idleLoop to restart IDLE
 		}
@@ -955,12 +991,12 @@ func (c *Client) primeBaselineAndBackfillFor(cli *imapclient.Client, mailbox str
 // checkNewMessages fetches and processes new messages
 func (c *Client) checkNewMessagesFor(cli *imapclient.Client, mailbox string, isSent bool) error {
 	c.log.Info().Msg("[SYNC] Starting manual sync - checking for new messages")
-	
+
 	// Guard against nil client handles to avoid panics
 	if cli == nil {
 		return fmt.Errorf("imap client unavailable for %s", mailbox)
 	}
-	
+
 	// Get current lastUID safely
 	c.mu.RLock()
 	var currentLastUID imap.UID
@@ -970,29 +1006,29 @@ func (c *Client) checkNewMessagesFor(cli *imapclient.Client, mailbox string, isS
 		currentLastUID = c.lastInboxUID
 	}
 	c.mu.RUnlock()
-	
+
 	// Use SEARCH command to find new messages without affecting IDLE state
 	c.log.Info().Uint32("from_uid", uint32(currentLastUID+1)).Uint32("current_last_uid", uint32(currentLastUID)).Str("mailbox", mailbox).Msg("Searching for new messages")
-	
+
 	// Create UID set for messages after our last processed UID
 	uidSet := imap.UIDSet{}
 	uidSet.AddRange(currentLastUID+1, 0) // 0 means "to end"
-	
+
 	// Search for messages with UIDs in this range
 	searchCriteria := imap.SearchCriteria{
 		UID: []imap.UIDSet{uidSet},
 	}
-	
+
 	// If this is the first sync (lastUID=0), just get current state and mark as up-to-date
 	if currentLastUID == 0 {
 		c.log.Info().Msg("First sync detected (lastUID=0), setting up to only sync NEW messages going forward")
 		c.log.Warn().Msg("First sync policy will SKIP any messages already in INBOX. Consider backfill if needed.")
 		// Get the current highest UID to mark as our starting point
 		c.log.Debug().Str("mailbox", mailbox).Msg("[IMAP] Executing STATUS command to get UIDNext")
-statusCmd := cli.Status(mailbox, &imap.StatusOptions{
+		statusCmd := cli.Status(mailbox, &imap.StatusOptions{
 			UIDNext: true,
 		})
-statusData, err := statusCmd.Wait()
+		statusData, err := statusCmd.Wait()
 		if err != nil {
 			c.log.Error().Err(err).Msg("Failed to get INBOX status")
 			if isHardNetErr(err) {
@@ -1007,9 +1043,9 @@ statusData, err := statusCmd.Wait()
 			}
 			return fmt.Errorf("failed to get INBOX status: %w", err)
 		}
-		
+
 		c.log.Info().Uint32("uidnext", uint32(statusData.UIDNext)).Str("mailbox", mailbox).Msg("[IMAP] STATUS command completed")
-		
+
 		// Set lastUID to current highest UID so we only sync NEW messages from now on
 		currentHighestUID := statusData.UIDNext - 1
 		c.mu.Lock()
@@ -1019,27 +1055,27 @@ statusData, err := statusCmd.Wait()
 			c.lastInboxUID = currentHighestUID
 		}
 		c.mu.Unlock()
-		
+
 		c.log.Info().Uint32("last_uid", uint32(currentHighestUID)).Str("mailbox", mailbox).Msg("First sync complete - up-to-date, will only sync NEW messages")
 		c.log.Trace().Uint32("uidnext", uint32(statusData.UIDNext)).Uint32("baseline_uid", uint32(currentHighestUID)).Str("mailbox", mailbox).Msg("Established baseline UID at startup")
 		return nil // No need to search for existing messages
 	}
-	
+
 	c.log.Debug().Interface("search_criteria", searchCriteria).Msg("Starting IMAP UID search")
-	
+
 	// Create search command with timeout handling
-searchCmd := cli.UIDSearch(&searchCriteria, nil)
+	searchCmd := cli.UIDSearch(&searchCriteria, nil)
 	var newUIDs []imap.UID
-	
+
 	// Wait for search results with timeout
 	c.log.Debug().Msg("Waiting for IMAP search results")
-	
+
 	// Create a timeout channel for the search operation
-	searchDone := make(chan struct{
+	searchDone := make(chan struct {
 		result *imap.SearchData
 		err    error
 	}, 1)
-	
+
 	go func() {
 		result, err := searchCmd.Wait()
 		searchDone <- struct {
@@ -1047,11 +1083,11 @@ searchCmd := cli.UIDSearch(&searchCriteria, nil)
 			err    error
 		}{result: result, err: err}
 	}()
-	
+
 	// Wait with timeout
 	var searchResult *imap.SearchData
 	select {
-case response := <-searchDone:
+	case response := <-searchDone:
 		if response.err != nil {
 			c.log.Error().Err(response.err).Msg("Failed to search for new messages")
 			if isHardNetErr(response.err) {
@@ -1067,16 +1103,16 @@ case response := <-searchDone:
 			return fmt.Errorf("failed to search for new messages: %w", response.err)
 		}
 		searchResult = response.result
-case <-time.After(c.timeoutConfig.Command):
+	case <-time.After(c.timeoutConfig.Command):
 		c.log.Error().Dur("timeout", c.timeoutConfig.Command).Msg("IMAP search timed out")
 		return fmt.Errorf("IMAP search timed out after %v", c.timeoutConfig.Command)
 	}
-	
+
 	c.log.Debug().Msg("IMAP search completed")
-	
+
 	// Get the UIDs from search results
 	newUIDs = searchResult.AllUIDs()
-	
+
 	// Filter out any UIDs that are not strictly newer than our last processed UID
 	{
 		c.mu.RLock()
@@ -1090,14 +1126,14 @@ case <-time.After(c.timeoutConfig.Command):
 		}
 		newUIDs = filtered
 	}
-	
+
 	if len(newUIDs) == 0 {
 		c.log.Info().Msg("No new messages found")
 		return nil
 	}
-	
+
 	c.log.Info().Int("count", len(newUIDs)).Str("mailbox", mailbox).Msg("Found new messages")
-	
+
 	// Update lastUID before processing to prevent reprocessing the same messages
 	// even if processing fails for individual messages
 	if len(newUIDs) > 0 {
@@ -1108,7 +1144,7 @@ case <-time.After(c.timeoutConfig.Command):
 				highestUID = uid
 			}
 		}
-		
+
 		c.mu.Lock()
 		if isSent {
 			c.lastSentUID = highestUID
@@ -1118,7 +1154,7 @@ case <-time.After(c.timeoutConfig.Command):
 		c.mu.Unlock()
 		c.log.Info().Uint32("new_last_uid", uint32(highestUID)).Str("mailbox", mailbox).Msg("Updated lastUID before processing to prevent reprocessing")
 	}
-	
+
 	// Process the new messages
 	var processingErrors []error
 	for _, uid := range newUIDs {
@@ -1135,7 +1171,7 @@ case <-time.After(c.timeoutConfig.Command):
 		}
 		c.endUID(uid, isSent)
 	}
-	
+
 	if len(processingErrors) > 0 {
 		c.log.Warn().Int("failed_messages", len(processingErrors)).Int("total_messages", len(newUIDs)).Str("mailbox", mailbox).Msg("Sync completed with some failures")
 	} else {
@@ -1150,7 +1186,6 @@ func (c *Client) SetProcessor(processor *email.Processor) {
 	defer c.mu.Unlock()
 	c.processor = processor
 }
-
 
 // getPortalLock returns a mutex for a given portal ID, creating it if needed
 func (c *Client) getPortalLock(id string) *sync.Mutex {
@@ -1206,10 +1241,10 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 
 	// Fetch message with headers and body
 	fetchOptions := &imap.FetchOptions{
-		Envelope: true,
+		Envelope:      true,
 		BodyStructure: &imap.FetchItemBodyStructure{},
-		Flags: true,
-		UID: true,
+		Flags:         true,
+		UID:           true,
 	}
 
 	// Also fetch headers, text content, and the full raw body so MIME parts (HTML/attachments) are available
@@ -1275,16 +1310,16 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 		// Ensure portal exists before queuing the event
 		portalKey := emailMessage.PortalKey
 		c.log.Info().Str("portal_key", string(portalKey.ID)).Str("receiver", string(portalKey.Receiver)).Msg("Checking if portal exists before queuing event")
-		
+
 		// Debug: Log detailed portal key information
 		c.log.Debug().Interface("portal_key_full", portalKey).Msg("Full portal key details")
-		
+
 		portal, err := c.login.Bridge.GetExistingPortalByKey(ctx, portalKey)
 		if err != nil {
 			c.log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to check existing portal")
 			return fmt.Errorf("failed to check portal existence: %w", err)
 		}
-		
+
 		if portal == nil {
 			c.log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal doesn't exist, creating it")
 			// Create the portal - this will call GetChatInfo to set up the room
@@ -1297,7 +1332,7 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 		} else {
 			c.log.Info().Str("portal_key", string(portalKey.ID)).Str("portal_mxid", portal.MXID.String()).Interface("portal_info", portal).Msg("Portal already exists - no need to create")
 		}
-		
+
 		// CRITICAL: Force Matrix room creation if portal exists but has no MXID
 		if portal.MXID == "" {
 			c.log.Info().Str("portal_key", string(portalKey.ID)).Msg("Portal exists but has no Matrix room - forcing room creation")
@@ -1308,7 +1343,7 @@ func (c *Client) processMessageWith(ctx context.Context, cli *imapclient.Client,
 			}
 			c.log.Info().Str("portal_key", string(portalKey.ID)).Str("new_mxid", portal.MXID.String()).Msg("Successfully forced Matrix room creation")
 		}
-		
+
 		// Ensure the Matrix room exists (idempotent, concurrency-safe)
 		if err := c.ensurePortalRoom(ctx, portal); err != nil {
 			c.log.Error().Err(err).Str("portal_key", string(portalKey.ID)).Msg("Failed to ensure Matrix room exists for portal")
@@ -1356,16 +1391,16 @@ func (c *Client) reconnectClient() error {
 	// Acquire connection guard to prevent concurrent reconnect attempts
 	c.connectingMu.Lock()
 	defer c.connectingMu.Unlock()
-	
+
 	if c.isConnecting {
 		return fmt.Errorf("connection operation already in progress")
 	}
 	c.isConnecting = true
 	defer func() { c.isConnecting = false }()
-	
+
 	// Disconnect first
 	c.Disconnect()
-	
+
 	// Use retry with exponential backoff - let circuit breaker handle allow/reject logic
 	return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
 		c.log.Info().Msg("Attempting IMAP reconnection")
@@ -1382,19 +1417,19 @@ func (c *Client) reconnectClient() error {
 func (c *Client) Shutdown() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	if c.isShutdown {
 		return
 	}
 	c.isShutdown = true
-	
+
 	c.log.Info().Msg("Shutting down IMAP client")
-	
+
 	// Cancel context to stop all operations
 	if c.cancel != nil {
 		c.cancel()
 	}
-	
+
 	// Stop IDLE
 	if c.idling {
 		select {
@@ -1404,7 +1439,7 @@ func (c *Client) Shutdown() {
 		}
 		c.idling = false
 	}
-	
+
 	// Disconnect
 	c.Disconnect()
 }
@@ -1445,21 +1480,21 @@ func (c *Client) CheckNewMessages() error {
 	connected := c.connected
 	idling := c.idling
 	c.mu.RUnlock()
-	
+
 	if !connected {
 		return fmt.Errorf("IMAP client not connected")
 	}
-	
+
 	// If IDLE is running, we need to temporarily stop it to run Status command
 	if idling {
 		c.log.Info().Msg("Temporarily stopping IDLE for manual sync")
 		c.StopIDLE()
-		
+
 		// Wait for IDLE to fully stop with timeout
 		timeout := time.After(2 * time.Second)
 		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-timeout:
@@ -1475,11 +1510,11 @@ func (c *Client) CheckNewMessages() error {
 				}
 			}
 		}
-		
-		runSync:
-	// Run the sync for the specified mailbox
+
+	runSync:
+		// Run the sync for the specified mailbox
 		err := c.checkNewMessagesFor(c.client, mailbox, isSent)
-		
+
 		// Restart IDLE with retry logic (same as startup)
 		c.log.Info().Msg("Restarting IDLE after manual sync")
 		if restartErr := c.safeStartIDLE(); restartErr != nil {
@@ -1488,10 +1523,10 @@ func (c *Client) CheckNewMessages() error {
 			// The sync itself was successful, IDLE can be retried by the background loops
 			c.log.Warn().Msg("Sync completed successfully, but IDLE restart failed - periodic sync will continue")
 		}
-		
+
 		return err
 	}
-	
+
 	// IDLE not running, safe to check messages directly
 	return c.checkNewMessagesFor(c.client, mailbox, isSent)
 }
@@ -1502,27 +1537,27 @@ func (c *Client) TestConnection() error {
 	connected := c.connected
 	client := c.client
 	c.mu.RUnlock()
-	
+
 	if !connected || client == nil {
 		return fmt.Errorf("IMAP client not connected")
 	}
-	
+
 	// Send NOOP command to test connection health with context cancellation
 	// This will fail if the connection is stale or if there are server-side issues
 	testCtx, testCancel := context.WithTimeout(c.ctx, c.timeoutConfig.Command)
 	defer testCancel()
-	
+
 	noopErr := make(chan error, 1)
 	go func() {
 		defer common.RecoverToError(noopErr)
-		
+
 		// Execute NOOP with context awareness
 		cmd := client.Noop()
 		done := make(chan error, 1)
 		go func() {
 			done <- cmd.Wait()
 		}()
-		
+
 		select {
 		case err := <-done:
 			noopErr <- err
@@ -1535,7 +1570,7 @@ func (c *Client) TestConnection() error {
 			noopErr <- testCtx.Err()
 		}
 	}()
-	
+
 	select {
 	case err := <-noopErr:
 		if err != nil {
@@ -1543,7 +1578,7 @@ func (c *Client) TestConnection() error {
 			if errors.Is(err, context.DeadlineExceeded) {
 				return fmt.Errorf("NOOP command timed out after %v", c.timeoutConfig.Command)
 			}
-			
+
 			// If this looks like a hard network error, force-clear state so callers can reconnect
 			if isHardNetErr(err) {
 				c.mu.Lock()
@@ -1561,7 +1596,7 @@ func (c *Client) TestConnection() error {
 		// Secondary timeout check in case the goroutine doesn't respond
 		return fmt.Errorf("NOOP test context cancelled: %v", testCtx.Err())
 	}
-	
+
 	c.log.Debug().Msg("Connection test successful (NOOP command completed)")
 	return nil
 }
@@ -1579,7 +1614,7 @@ func (c *Client) safeStartIDLE() error {
 				return
 			}
 		}
-		
+
 		// Try starting IDLE
 		if err := c.StartIDLE(); err != nil {
 			// Check for the "already running" issue
@@ -1598,8 +1633,8 @@ func (c *Client) safeStartIDLE() error {
 		}
 		done <- nil // Success
 	}()
-	
-// Wait with timeout - use command timeout from config for consistency
+
+	// Wait with timeout - use command timeout from config for consistency
 	select {
 	case err := <-done:
 		return err
@@ -1618,7 +1653,6 @@ func (c *Client) testConnectionNoLock() error {
 	}
 	return c.client.Noop().Wait()
 }
-
 
 // ensureSentConnectionAndLoop establishes and maintains a second IMAP connection to the
 // Sent mailbox. It primes baseline/backfill and then starts a parallel IDLE loop.
@@ -1674,7 +1708,7 @@ func (c *Client) ensureSentConnectionAndLoop() {
 	c.sentMu.Unlock()
 
 	c.log.Info().Str("mailbox", c.sentFolder).Msg("Started dedicated Sent mailbox connection")
-	
+
 	// Report Sent connection success
 	if c.stateCoordinator != nil {
 		c.stateCoordinator.ReportSimpleEvent("sent", string(coordinator.EventConnectionEstablished), true, "", nil)
@@ -1717,13 +1751,20 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 		stopChLocal := c.sentStop
 		c.sentMu.Unlock()
 		if stopChLocal != nil {
-			select { case <-stopChLocal: default: }
+			select {
+			case <-stopChLocal:
+			default:
+			}
 		}
 		base := time.Duration(failureCount) * 5 * time.Second
-		if base > 5*time.Minute { base = 5 * time.Minute }
+		if base > 5*time.Minute {
+			base = 5 * time.Minute
+		}
 		jitter := time.Duration((rand.Float64()*0.4 - 0.2) * float64(base))
 		backoff := base + jitter
-		if backoff < 0 { backoff = base }
+		if backoff < 0 {
+			backoff = base
+		}
 		c.log.Warn().Dur("backoff", backoff).Err(reason).Msg("Rebuilding Sent connection after failure")
 		time.Sleep(backoff)
 		go c.ensureSentConnectionAndLoop()
@@ -1755,11 +1796,11 @@ func (c *Client) sentIdleLoop(cli *imapclient.Client, stopCh <-chan struct{}) {
 			if err := idleCmd.Close(); err != nil {
 				c.log.Warn().Err(err).Msg("Error closing Sent IDLE command")
 			}
-			
+
 			// Wait a moment for server to process IDLE termination
 			// This prevents "UID SEARCH not allowed now" errors on Sent mailbox
 			time.Sleep(100 * time.Millisecond)
-			
+
 			if err := c.checkNewMessagesFor(cli, c.sentFolder, true); err != nil {
 				c.log.Warn().Err(err).Str("mailbox", c.sentFolder).Msg("Sent check on IDLE timeout failed")
 				// If client handle is bad/unavailable, rebuild Sent connection
@@ -1796,7 +1837,6 @@ func (c *Client) triggerReconnect() {
 	}
 }
 
-
 // sentHealthLoop periodically NOOPs the Sent connection and triggers a rebuild on failure.
 func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(1 * time.Minute)
@@ -1810,11 +1850,11 @@ func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 			func() {
 				c.sentMu.RLock()
 				defer c.sentMu.RUnlock()
-				
+
 				if c.sentClient == nil {
 					return
 				}
-				
+
 				// Keep the lock while performing the operation to prevent races
 				noop := c.sentClient.Noop()
 				if err := noop.Wait(); err != nil {
@@ -1825,7 +1865,7 @@ func (c *Client) sentHealthLoop(stopCh <-chan struct{}) {
 						go func() {
 							c.sentMu.Lock()
 							defer c.sentMu.Unlock()
-							
+
 							// Double-check the client is still the same (avoid race)
 							if c.sentClient != nil {
 								c.sentClient.Close()
@@ -1895,15 +1935,15 @@ func (c *Client) resetConnection() error {
 	// Acquire connection guard to prevent concurrent reset/connect attempts
 	c.connectingMu.Lock()
 	defer c.connectingMu.Unlock()
-	
+
 	if c.isConnecting {
 		return fmt.Errorf("connection operation already in progress")
 	}
 	c.isConnecting = true
 	defer func() { c.isConnecting = false }()
-	
+
 	c.log.Info().Msg("Resetting IMAP connection to clear server-side IDLE state")
-	
+
 	// Force disconnect without proper logout (since server state is already confused)
 	c.mu.Lock()
 	if c.client != nil {
@@ -1913,15 +1953,15 @@ func (c *Client) resetConnection() error {
 	c.connected = false
 	c.idling = false
 	c.mu.Unlock()
-	
+
 	// Wait a moment for server-side cleanup
 	time.Sleep(2 * time.Second)
-	
+
 	// Establish fresh connection (bypass Connect's own guard since we already hold it)
 	if err := c.connectInternal(); err != nil {
 		return fmt.Errorf("failed to reconnect after reset: %w", err)
 	}
-	
+
 	// Try IDLE again on the fresh connection
 	return c.StartIDLE()
 }
@@ -1933,25 +1973,25 @@ func (c *Client) performIDLERecovery() error {
 		c.log.Warn().Msg("Circuit breaker unavailable, using direct reconnection")
 		return c.reconnectClient()
 	}
-	
+
 	// Use retry logic that's circuit breaker aware
 	return reliability.RetryWithBackoff(c.ctx, c.retryConfig, func() error {
 		// Try to execute through circuit breaker
 		return c.circuitBreaker.Execute(func() error {
 			c.log.Info().Msg("Attempting IDLE recovery with circuit breaker protection")
-			
+
 			// First attempt to reconnect
 			if err := c.reconnectClient(); err != nil {
 				c.log.Warn().Err(err).Msg("Reconnection attempt failed during IDLE recovery")
 				return err
 			}
-			
+
 			// Then attempt to restart IDLE
 			if err := c.StartIDLE(); err != nil {
 				c.log.Warn().Err(err).Msg("IDLE restart failed during recovery")
 				return err
 			}
-			
+
 			c.log.Info().Msg("IDLE recovery completed successfully")
 			return nil
 		})

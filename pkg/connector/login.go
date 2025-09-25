@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,11 +16,14 @@ import (
 
 // EmailLoginProcess represents the email login flow
 type EmailLoginProcess struct {
-	user      *bridgev2.User
-	connector *EmailConnector
-	email     string
-	username  string
-	password  string
+	user        *bridgev2.User
+	connector   *EmailConnector
+	email       string
+	username    string
+	password    string
+	imapHost    string
+	imapPort    int
+	imapPortSet bool
 }
 
 var (
@@ -53,6 +57,12 @@ func (elp *EmailLoginProcess) Start(ctx context.Context) (*bridgev2.LoginStep, e
 					Name:        "Password",
 					Description: "Your email password or App Password",
 				},
+				{
+					Type:        bridgev2.LoginInputFieldTypeDomain,
+					ID:          "imap_host",
+					Name:        "IMAP Server (optional)",
+					Description: "Override auto-detected server, e.g. imap.gmail.com",
+				},
 			},
 		},
 	}, nil
@@ -67,6 +77,7 @@ func (elp *EmailLoginProcess) buildLoginInstructions() string {
 **Important Notes:**
 • For Gmail/Yahoo/Outlook: Use an **App Password** (not your regular password)
 • The bridge will automatically detect your email provider settings
+• Custom domains using hosted email (e.g. Google Workspace) can set the IMAP hostname manually
 • Your password will be encrypted and stored securely
 
 **App Password Setup Guide:**
@@ -77,7 +88,7 @@ func (elp *EmailLoginProcess) buildLoginInstructions() string {
 
 **Popular Providers Supported:**
 Gmail, Yahoo, Outlook, iCloud, FastMail - Auto-configured
-Custom IMAP servers - Auto-detected
+Custom IMAP servers - Auto-detected or manually specified via the optional IMAP Server field
 
 *The bridge will test your IMAP connection automatically after you submit your credentials.*
 
@@ -98,6 +109,10 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 			elp.email = strings.TrimSpace(value)
 		case "password":
 			elp.password = strings.TrimSpace(value)
+		case "imap_host":
+			if err := elp.setIMAPServer(value); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -130,6 +145,9 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 		if len(parts) == 2 {
 			domain := parts[1]
 			fallbackHost := fmt.Sprintf("imap.%s", domain)
+			if elp.imapHost != "" {
+				fallbackHost = elp.imapHost
+			}
 			elp.connector.Bridge.Log.Info().
 				Str("domain", domain).
 				Str("fallback_host", fallbackHost).
@@ -221,6 +239,108 @@ func (eul *EmailUserLogin) GetRemoteName() string {
 	return eul.Email
 }
 
+func (elp *EmailLoginProcess) setIMAPServer(input string) error {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		elp.imapHost = ""
+		elp.imapPort = 0
+		elp.imapPortSet = false
+		return nil
+	}
+
+	sanitized := strings.TrimSpace(trimmed)
+	sanitized = strings.TrimPrefix(sanitized, "imaps://")
+	sanitized = strings.TrimPrefix(sanitized, "imap://")
+	sanitized = strings.TrimPrefix(sanitized, "https://")
+	sanitized = strings.TrimPrefix(sanitized, "http://")
+	sanitized = strings.TrimSuffix(sanitized, "/")
+
+	host := sanitized
+	port := 0
+	portSet := false
+
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+		closing := strings.Index(host, "]")
+		if closing == -1 {
+			return fmt.Errorf("invalid IMAP server override: %s", input)
+		}
+		base := strings.TrimSpace(host[1:closing])
+		rest := strings.TrimSpace(host[closing+1:])
+		host = base
+		if strings.HasPrefix(rest, ":") {
+			portPart := strings.TrimSpace(rest[1:])
+			if portPart != "" {
+				parsed, err := strconv.Atoi(portPart)
+				if err != nil || parsed <= 0 || parsed > 65535 {
+					return fmt.Errorf("invalid IMAP server port: %s", portPart)
+				}
+				port = parsed
+				portSet = true
+			}
+		} else if rest != "" {
+			return fmt.Errorf("invalid IMAP server override: %s", input)
+		}
+	} else {
+		colonCount := strings.Count(host, ":")
+		if colonCount == 1 {
+			idx := strings.LastIndex(host, ":")
+			portPart := strings.TrimSpace(host[idx+1:])
+			hostPart := strings.TrimSpace(host[:idx])
+			if hostPart == "" {
+				return fmt.Errorf("IMAP server override must include a hostname")
+			}
+			parsed, err := strconv.Atoi(portPart)
+			if err != nil || parsed <= 0 || parsed > 65535 {
+				return fmt.Errorf("invalid IMAP server port: %s", portPart)
+			}
+			host = hostPart
+			port = parsed
+			portSet = true
+		} else if colonCount > 1 {
+			// Assume IPv6 literal without port; keep host as-is.
+		}
+	}
+
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("IMAP server override must include a hostname")
+	}
+	if strings.Contains(host, " ") || strings.Contains(host, "/") {
+		return fmt.Errorf("IMAP server hostname cannot contain spaces or paths")
+	}
+
+	elp.imapHost = host
+	if portSet {
+		elp.imapPort = port
+		elp.imapPortSet = true
+	} else {
+		elp.imapPort = 0
+		elp.imapPortSet = false
+	}
+
+	return nil
+}
+
+func (elp *EmailLoginProcess) connectionOverrides() *imap.ConnectionOverrides {
+	if elp.imapHost == "" && !elp.imapPortSet {
+		return nil
+	}
+
+	overrides := &imap.ConnectionOverrides{}
+	if elp.imapHost != "" {
+		overrides.Host = elp.imapHost
+	}
+	if elp.imapPortSet && elp.imapPort > 0 {
+		overrides.Port = elp.imapPort
+	}
+
+	if overrides.Host == "" && overrides.Port == 0 {
+		return nil
+	}
+
+	return overrides
+}
+
 // testIMAPConnection tests the IMAP connection with provided credentials
 func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 	// Keep ctx parameter used to satisfy linters even if not currently leveraged here.
@@ -229,16 +349,16 @@ func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
 	logger := elp.connector.Bridge.Log.With().
 		Str("component", "login_test").
 		Str("email", elp.email)
-	
+
 	// Safely extract domain for logging
 	if parts := strings.Split(elp.email, "@"); len(parts) == 2 {
 		logger = logger.Str("host_detected", parts[1])
 	}
-	
+
 	finalLogger := logger.Logger()
 
-		// Create test IMAP client without UserLogin (just for testing connection)
-	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &finalLogger, elp.connector.Config.Logging.Sanitized, elp.connector.Config.Logging.PseudonymSecret, elp.connector.Config.Network.IMAP.StartupBackfillSeconds, elp.connector.Config.Network.IMAP.StartupBackfillMax, elp.connector.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
+	// Create test IMAP client without UserLogin (just for testing connection)
+	client, err := imap.NewClient(elp.email, elp.username, elp.password, elp.connectionOverrides(), nil, &finalLogger, elp.connector.Config.Logging.Sanitized, elp.connector.Config.Logging.PseudonymSecret, elp.connector.Config.Network.IMAP.StartupBackfillSeconds, elp.connector.Config.Network.IMAP.StartupBackfillMax, elp.connector.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create IMAP client: %w", err)
 	}
@@ -285,6 +405,18 @@ func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
 		port = 993
 		tls = true
 	}
+
+	if elp.imapHost != "" {
+		host = elp.imapHost
+	}
+
+	if elp.imapPortSet && elp.imapPort > 0 {
+		port = elp.imapPort
+	} else if port == 0 {
+		port = 993
+	}
+
+	host = strings.TrimSpace(host)
 
 	account := &EmailAccount{
 		UserMXID:     elp.user.MXID.String(),
@@ -360,6 +492,45 @@ func (elp *EmailLoginProcess) detectEmailProvider() *ProviderInfo {
 			HelpURL:     "https://support.apple.com/en-us/HT204397",
 		}
 	default:
+		if elp.imapHost != "" {
+			switch strings.ToLower(elp.imapHost) {
+			case "imap.gmail.com":
+				return &ProviderInfo{
+					Name:        "Gmail (custom domain)",
+					Domain:      domain,
+					NeedsAppPwd: true,
+					HelpURL:     "https://support.google.com/accounts/answer/185833",
+				}
+			case "outlook.office365.com":
+				return &ProviderInfo{
+					Name:        "Outlook (custom domain)",
+					Domain:      domain,
+					NeedsAppPwd: true,
+					HelpURL:     "https://support.microsoft.com/en-us/account-billing/using-app-passwords-with-apps-that-don-t-support-two-step-verification-5896ed9b-4263-e681-128a-a6f2979a7944",
+				}
+			case "imap.mail.yahoo.com":
+				return &ProviderInfo{
+					Name:        "Yahoo (custom domain)",
+					Domain:      domain,
+					NeedsAppPwd: true,
+					HelpURL:     "https://help.yahoo.com/kb/generate-third-party-passwords-sln15241.html",
+				}
+			case "imap.mail.me.com":
+				return &ProviderInfo{
+					Name:        "iCloud (custom domain)",
+					Domain:      domain,
+					NeedsAppPwd: true,
+					HelpURL:     "https://support.apple.com/en-us/HT204397",
+				}
+			case "imap.fastmail.com":
+				return &ProviderInfo{
+					Name:        "FastMail (custom domain)",
+					Domain:      domain,
+					NeedsAppPwd: false,
+					HelpURL:     "https://www.fastmail.help/hc/en-us/articles/360058752754-App-passwords",
+				}
+			}
+		}
 		return &ProviderInfo{
 			Name:        "Custom Provider",
 			Domain:      domain,
@@ -428,7 +599,7 @@ func (elp *EmailLoginProcess) buildConnectionErrorMessage(err error, provider *P
 			domain = parts[1]
 			fallbackHost = fmt.Sprintf("imap.%s", domain)
 		}
-		
+
 		return fmt.Sprintf(`❌ **Connection Failed - Auto-Detection Used**
 
 🔍 **We attempted to connect using:** %s:993
