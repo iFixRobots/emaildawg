@@ -47,7 +47,7 @@ func (r *DBThreadMetadataResolver) ResolveThreadID(receiver, messageID string) (
 	// Use single UNION query to check all possible table/column combinations efficiently
 	// Try both raw and namespaced remote IDs to be robust
 	candidates := []string{mid, "email:" + mid}
-	
+
 	// Build single query that tries all combinations with UNION
 	unionQuery := `
 		SELECT portal_id, 'message_with_receiver' as source FROM message 
@@ -62,7 +62,7 @@ func (r *DBThreadMetadataResolver) ResolveThreadID(receiver, messageID string) (
 		SELECT portal_id, 'messages_no_receiver' as source FROM messages 
 		WHERE network = ? AND remote_id = ?
 		LIMIT 1`
-		
+
 	for _, rid := range candidates {
 		if result := r.queryUnionResult(ctx, unionQuery, r.Network, rid, receiver, r.Network, rid, r.Network, rid, receiver, r.Network, rid); result != "" {
 			ntid := normalizeThreadID(result)
@@ -90,7 +90,7 @@ func (r *DBThreadMetadataResolver) queryUnionResult(ctx context.Context, sql str
 		return ""
 	}
 	defer rows.Close()
-	
+
 	if rows.Next() {
 		var portalID, source string
 		if err := rows.Scan(&portalID, &source); err == nil {
@@ -108,7 +108,6 @@ func (r *DBThreadMetadataResolver) queryUnionResult(ctx context.Context, sql str
 	}
 	return ""
 }
-
 
 func normalizeThreadID(portalOrThreadID string) string {
 	id := strings.TrimSpace(portalOrThreadID)

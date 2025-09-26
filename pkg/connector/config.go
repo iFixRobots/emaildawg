@@ -11,11 +11,11 @@ var ExampleConfig string
 
 type Config struct {
 	// Top-level blocks to match example-config.yaml structure
-	IMAP       IMAPConfig        `yaml:"imap"`
-	Logging    LoggingConfig     `yaml:"logging"`
-	Processing ProcessingConfig  `yaml:"email_processing"`
+	IMAP       IMAPConfig       `yaml:"imap"`
+	Logging    LoggingConfig    `yaml:"logging"`
+	Processing ProcessingConfig `yaml:"email_processing"`
 	// Keep Network for internal use but don't map to YAML
-	Network    NetworkConfig     `yaml:"-"`
+	Network NetworkConfig `yaml:"-"`
 }
 
 type NetworkConfig struct {
@@ -43,24 +43,24 @@ const DefaultMaxUploadBytes = 25 * 1024 * 1024 // 25 MiB
 
 type ProcessingConfig struct {
 	// Maximum size in bytes for a single media upload. Set 0 to disable the check.
-	MaxUploadBytes int  `yaml:"max_upload_bytes"`
+	MaxUploadBytes int `yaml:"max_upload_bytes"`
 	// If true, attempt gzip for oversized original HTML/text bodies before attaching.
 	GzipLargeBodies bool `yaml:"gzip_large_bodies"`
 }
 
 func upgradeConfig(helper up.Helper) {
 	// Copy all keys that exist in the embedded example (pkg/connector/example-config.yaml)
-	
+
 	// IMAP configuration
 	helper.Copy(up.Int, "imap", "default_timeout")
-	helper.Copy(up.Int, "imap", "startup_backfill_seconds") 
+	helper.Copy(up.Int, "imap", "startup_backfill_seconds")
 	helper.Copy(up.Int, "imap", "startup_backfill_max")
 	helper.Copy(up.Int, "imap", "initial_idle_timeout_seconds")
-	
+
 	// Email processing configuration
 	helper.Copy(up.Int, "email_processing", "max_upload_bytes")
 	helper.Copy(up.Bool, "email_processing", "gzip_large_bodies")
-	
+
 	// Logging configuration
 	helper.Copy(up.Bool, "logging", "sanitized")
 	helper.Copy(up.Str, "logging", "pseudonym_secret")
@@ -69,7 +69,7 @@ func upgradeConfig(helper up.Helper) {
 func (ec *EmailConnector) GetConfig() (string, any, up.Upgrader) {
 	return ExampleConfig, &ec.Config, &up.StructUpgrader{
 		SimpleUpgrader: up.SimpleUpgrader(upgradeConfig),
-		Blocks: [][]string{},
-		Base: ExampleConfig,
+		Blocks:         [][]string{},
+		Base:           ExampleConfig,
 	}
 }

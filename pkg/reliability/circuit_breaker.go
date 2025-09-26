@@ -40,15 +40,15 @@ func (s CircuitBreakerState) String() string {
 
 // CircuitBreaker implements the circuit breaker pattern for fault tolerance
 type CircuitBreaker struct {
-	mu                   sync.RWMutex
-	maxFailures          int
-	timeout              time.Duration
-	failures             int
-	lastFailureTime      time.Time
-	state                CircuitBreakerState
+	mu              sync.RWMutex
+	maxFailures     int
+	timeout         time.Duration
+	failures        int
+	lastFailureTime time.Time
+	state           CircuitBreakerState
 	// Half-open state management
-	maxHalfOpenRequests  int
-	halfOpenRequests     int32 // atomic counter for concurrent requests in half-open state
+	maxHalfOpenRequests int
+	halfOpenRequests    int32 // atomic counter for concurrent requests in half-open state
 	// State change notification
 	stateChangeCallback StateChangeCallback // Optional callback for state changes
 }
@@ -62,7 +62,7 @@ func NewCircuitBreaker(maxFailures int, timeout time.Duration) (*CircuitBreaker,
 	if timeout <= 0 {
 		return nil, errors.New("timeout must be greater than 0")
 	}
-	
+
 	return &CircuitBreaker{
 		maxFailures:         maxFailures,
 		timeout:             timeout,
@@ -85,17 +85,17 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Ensure we decrement if we incremented, regardless of state changes
 	defer func() {
 		if shouldDecrement {
 			atomic.AddInt32(&cb.halfOpenRequests, -1)
 		}
 	}()
-	
+
 	// Execute function
 	err = fn()
-	
+
 	cb.recordResult(err)
 	return err
 }
@@ -119,7 +119,7 @@ func (cb *CircuitBreaker) checkStateAndIncrement() (bool, error) {
 				oldState := cb.state
 				cb.state = StateHalfOpen
 				atomic.StoreInt32(&cb.halfOpenRequests, 0) // Reset counter
-				
+
 				// Notify callback of state change outside lock to prevent deadlock
 				callback := cb.stateChangeCallback
 				cb.mu.Unlock()
@@ -131,7 +131,7 @@ func (cb *CircuitBreaker) checkStateAndIncrement() (bool, error) {
 			currentState = cb.state // Update local state
 			cb.mu.Unlock()
 		}
-		
+
 		if currentState == StateOpen {
 			return false, ErrCircuitBreakerOpen
 		}
@@ -169,7 +169,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 			cb.state = StateOpen
 		}
 	}
-	
+
 	// Reset half-open counter when transitioning out of half-open state
 	if oldState == StateHalfOpen && cb.state != StateHalfOpen {
 		atomic.StoreInt32(&cb.halfOpenRequests, 0)
@@ -183,7 +183,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 		newState = cb.state
 	}
 	cb.mu.Unlock() // Release lock before callback
-	
+
 	if callback != nil {
 		callback(oldState, newState)
 	}

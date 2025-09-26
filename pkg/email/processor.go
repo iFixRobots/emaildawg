@@ -17,19 +17,19 @@ import (
 	"net/textproto"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
-	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/iFixRobots/emaildawg/pkg/common"
+	logging "github.com/iFixRobots/emaildawg/pkg/logging"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
-	logging "github.com/iFixRobots/emaildawg/pkg/logging"
-	"github.com/iFixRobots/emaildawg/pkg/common"
 )
 
 // Matrix content size limits and thresholds
@@ -37,11 +37,11 @@ const (
 	// MaxMatrixContentSize is the conservative limit for Matrix events (48 KiB)
 	// Matrix rejects events > 64 KiB after encryption, so we use a conservative cap
 	MaxMatrixContentSize = 48 * 1024
-	
+
 	// HTMLMinificationTarget is the target size for HTML minification (24 KiB)
 	// Conservative target to account for encryption overhead
 	HTMLMinificationTarget = 24 * 1024
-	
+
 	// PerEventTarget is the conservative per-event target for chunked content (16 KiB)
 	// Use conservative target to account for encryption overhead
 	PerEventTarget = 16 * 1024
@@ -61,7 +61,6 @@ type Processor struct {
 	sanitized bool
 	secret    string
 
-
 	// MaxUploadBytes limits individual media uploads to Matrix. Items larger than this
 	// will either be gzipped (for text/html and text/plain bodies) or skipped with a notice.
 	MaxUploadBytes int
@@ -72,12 +71,12 @@ type Processor struct {
 // NewProcessor creates a new email processor
 func NewProcessor(log *zerolog.Logger, threadManager *ThreadManager, sanitized bool, secret string) *Processor {
 	logger := log.With().Str("component", "email_processor").Logger()
-return &Processor{
-		log:           &logger,
-		threadManager: threadManager,
-		sanitized:     sanitized,
-		secret:       secret,
-		MaxUploadBytes: 0, // set by connector; 0 means unlimited unless overridden
+	return &Processor{
+		log:             &logger,
+		threadManager:   threadManager,
+		sanitized:       sanitized,
+		secret:          secret,
+		MaxUploadBytes:  0, // set by connector; 0 means unlimited unless overridden
 		GzipLargeBodies: true,
 	}
 }
@@ -208,45 +207,45 @@ func (p *Processor) parseIMAPFetchData(fetchData *imapclient.FetchMessageData) (
 	// Initialize parsed email with basic information from IMAP fetch data
 	parsedEmail := &ParsedEmail{
 		MessageID: fmt.Sprintf("uid-%d", buf.UID), // Fallback if no Message-ID found
-		Date:     time.Now(), // Fallback if no date found
+		Date:      time.Now(),                     // Fallback if no date found
 	}
 
 	// Extract data from envelope if available
 	if buf.Envelope != nil {
 		env := buf.Envelope
-		
+
 		// Extract Message-ID
 		if env.MessageID != "" {
 			parsedEmail.MessageID = cleanMessageID(env.MessageID)
 		}
-		
+
 		// Extract subject
 		if env.Subject != "" {
 			parsedEmail.Subject = env.Subject
 		}
-		
+
 		// Extract In-Reply-To
 		if len(env.InReplyTo) > 0 {
 			parsedEmail.InReplyTo = cleanMessageID(env.InReplyTo[0])
 		}
-		
+
 		// Extract date
 		if !env.Date.IsZero() {
 			parsedEmail.Date = env.Date
 		}
-		
+
 		// Extract sender
 		if len(env.From) > 0 {
 			parsedEmail.From = formatIMAPAddress(&env.From[0])
 		}
-		
+
 		// Extract recipients
 		parsedEmail.To = formatIMAPAddressSlice(env.To)
 		parsedEmail.Cc = formatIMAPAddressSlice(env.Cc)
 		parsedEmail.Bcc = formatIMAPAddressSlice(env.Bcc)
 	}
 
-// Parse body sections for text and HTML content
+	// Parse body sections for text and HTML content
 	textContent, htmlContent, err := p.parseMessageBody(buf)
 	if err != nil {
 		p.log.Warn().Err(err).Msg("Failed to parse message body, using fallback")
@@ -303,7 +302,7 @@ func (p *Processor) parseMessageBody(buf *imapclient.FetchMessageBuffer) (textCo
 		}
 	}
 
-// If we don't have text/plain but we do have HTML, derive a simple plaintext fallback
+	// If we don't have text/plain but we do have HTML, derive a simple plaintext fallback
 	if textContent == "" && htmlContent != "" {
 		textContent = simpleHTMLToText(htmlContent)
 	}
@@ -403,7 +402,7 @@ func (p *Processor) parseMultipartContent(body io.Reader, boundary string) (text
 			continue
 		}
 
-// Check Content-Type of this part
+		// Check Content-Type of this part
 		contentType := part.Header.Get("Content-Type")
 		mediaType, params, _ := mime.ParseMediaType(contentType)
 		p.log.Trace().
@@ -455,9 +454,9 @@ func (p *Processor) extractAttachments(buf *imapclient.FetchMessageBuffer) ([]*E
 		}
 
 		// Check if this section could be an attachment
-		if section.Section.Specifier != imap.PartSpecifierText && 
-		   section.Section.Specifier != imap.PartSpecifierHeader {
-			
+		if section.Section.Specifier != imap.PartSpecifierText &&
+			section.Section.Specifier != imap.PartSpecifierHeader {
+
 			// Try to parse as multipart content for attachments
 			attachments = append(attachments, p.extractMultipartAttachments(section.Bytes)...)
 		}
@@ -503,7 +502,7 @@ func (p *Processor) extractMultipartAttachments(data []byte) []*EmailAttachment 
 func (p *Processor) parseMultipartAttachments(body io.Reader, boundary string) []*EmailAttachment {
 	var attachments []*EmailAttachment
 
-mr := multipart.NewReader(body, boundary)
+	mr := multipart.NewReader(body, boundary)
 	for {
 		part, err := mr.NextPart()
 		if err != nil {
@@ -516,7 +515,7 @@ mr := multipart.NewReader(body, boundary)
 		contentDisposition := part.Header.Get("Content-Disposition")
 		dispLower := strings.ToLower(strings.TrimSpace(contentDisposition))
 
-// Read and decode part body with standard email size limit
+		// Read and decode part body with standard email size limit
 		cte := strings.ToLower(part.Header.Get("Content-Transfer-Encoding"))
 		decoded := decodeBody(part, cte)
 		limitedReader := io.LimitReader(decoded, 25*1024*1024) // 25MB standard limit
@@ -683,11 +682,11 @@ func detectBoundary(data []byte) string {
 // rather than current message content, to avoid extracting attachments from email thread history
 func (p *Processor) isQuotedContent(dataBytes []byte) bool {
 	// Check various indicators that this is quoted/forwarded content
-	
+
 	// 1. Look for common forwarded message headers within the content
 	dataStr := string(dataBytes)
 	lowerData := strings.ToLower(dataStr)
-	
+
 	// Common forwarded message markers
 	forwardMarkers := []string{
 		"-----original message-----",
@@ -696,20 +695,20 @@ func (p *Processor) isQuotedContent(dataBytes []byte) bool {
 		"---------- forwarded message ----------",
 		"from:", // Often appears at start of quoted content
 	}
-	
+
 	for _, marker := range forwardMarkers {
 		if strings.Contains(lowerData, marker) {
 			return true
 		}
 	}
-	
+
 	// 2. Check for reply indicators with Message-ID patterns
 	// These often indicate we're looking at a nested/quoted email
-	if strings.Contains(lowerData, "message-id:") && 
-	   (strings.Contains(lowerData, "date:") || strings.Contains(lowerData, "subject:")) {
+	if strings.Contains(lowerData, "message-id:") &&
+		(strings.Contains(lowerData, "date:") || strings.Contains(lowerData, "subject:")) {
 		return true
 	}
-	
+
 	// 3. Check content length - very large multipart sections in replies
 	// are often the entire quoted thread history
 	if len(dataBytes) > 100*1024 { // 100KB threshold
@@ -719,7 +718,7 @@ func (p *Processor) isQuotedContent(dataBytes []byte) bool {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -735,7 +734,6 @@ func formatIMAPAddress(addr *imap.Address) string {
 	return fmt.Sprintf("%s@%s", addr.Mailbox, addr.Host)
 }
 
-
 // formatIMAPAddressSlice converts IMAP v2 address slices to string slice
 func formatIMAPAddressSlice(addrs []imap.Address) []string {
 	if len(addrs) == 0 {
@@ -749,7 +747,6 @@ func formatIMAPAddressSlice(addrs []imap.Address) []string {
 	}
 	return result
 }
-
 
 // isOutboundMessage determines if this email was sent by the bridge user.
 // Currently, we only process the INBOX, so all processed emails are treated as inbound.
@@ -769,10 +766,10 @@ func (p *Processor) isOutboundMessage(mailbox string) bool {
 
 // ToMatrixEvent converts an EmailMessage to a bridgev2 RemoteMessage event
 func (p *Processor) ToMatrixEvent(ctx context.Context, emailMsg *EmailMessage, userLogin *bridgev2.UserLogin) bridgev2.RemoteMessage {
-return &EmailMatrixEvent{
+	return &EmailMatrixEvent{
 		emailMessage: emailMsg,
 		userLogin:    userLogin,
-		processor:   p,
+		processor:    p,
 	}
 }
 
@@ -781,11 +778,11 @@ return &EmailMatrixEvent{
 // InlineImageMeta holds metadata for an inline image we plan to post as a sidecar m.image
 // Index preserves document order for nice numbering.
 type InlineImageMeta struct {
-    Index int
-    Label string
-    MXC   id.ContentURIString
-    Mime  string
-    Size  int
+	Index int
+	Label string
+	MXC   id.ContentURIString
+	Mime  string
+	Size  int
 }
 
 // EmailMatrixEvent implements bridgev2.RemoteMessage for email messages
@@ -794,7 +791,6 @@ type EmailMatrixEvent struct {
 	userLogin    *bridgev2.UserLogin
 	processor    *Processor
 }
-
 
 // Implement bridgev2.RemoteMessage interface
 func (e *EmailMatrixEvent) GetID() networkid.MessageID {
@@ -820,13 +816,13 @@ func (e *EmailMatrixEvent) GetSender() bridgev2.EventSender {
 		}
 	}
 	ghostID := common.EmailToGhostID(fromEmail)
-	
+
 	if e.emailMessage.IsOutbound {
-		// For outbound messages: set both IsFromMe=true (for Matrix attribution) 
+		// For outbound messages: set both IsFromMe=true (for Matrix attribution)
 		// AND Sender=ghostID (for database storage and thread resolution)
 		return bridgev2.EventSender{Sender: ghostID, IsFromMe: true}
 	}
-	
+
 	// For inbound messages: only ghost sender
 	return bridgev2.EventSender{Sender: ghostID}
 }
@@ -904,15 +900,21 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 		// Build quick lookups for attachments by CID and Content-Location
 		// We'll process <img> tags in document order, upload needed parts, and replace with placeholders.
 		// Prepare a regex to find <img ...> tags.
-		reImgTag := regexp.MustCompile(`(?is)<\s*img\b[^>]*>`) 
+		reImgTag := regexp.MustCompile(`(?is)<\s*img\b[^>]*>`)
 		// Attribute extractors
 		extractAttr := func(tag, name string) string {
-			re := regexp.MustCompile(`(?i)` + name + `\s*=\s*([\'\"][^\'\"]*[\'\"]|[^\s>]+)`) 
+			re := regexp.MustCompile(`(?i)` + name + `\s*=\s*([\'\"][^\'\"]*[\'\"]|[^\s>]+)`)
 			m := re.FindStringSubmatch(tag)
-			if len(m) < 2 { return "" }
+			if len(m) < 2 {
+				return ""
+			}
 			val := strings.TrimSpace(m[1])
-			if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") { val = strings.TrimSuffix(strings.TrimPrefix(val, "\""), "\"") }
-			if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") { val = strings.TrimSuffix(strings.TrimPrefix(val, "'"), "'") }
+			if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+				val = strings.TrimSuffix(strings.TrimPrefix(val, "\""), "\"")
+			}
+			if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
+				val = strings.TrimSuffix(strings.TrimPrefix(val, "'"), "'")
+			}
 			return val
 		}
 
@@ -922,12 +924,16 @@ func (e *EmailMatrixEvent) ConvertMessage(ctx context.Context, portal *bridgev2.
 			occurrence++
 			src := strings.TrimSpace(extractAttr(tag, "src"))
 			alt := strings.TrimSpace(extractAttr(tag, "alt"))
-			if alt == "" { alt = strings.TrimSpace(extractAttr(tag, "title")) }
+			if alt == "" {
+				alt = strings.TrimSpace(extractAttr(tag, "title"))
+			}
 			low := strings.ToLower(src)
 			// Helper to add an inline meta and return placeholder
-add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) string {
+			add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) string {
 				label := defaultLabel
-				if alt != "" { label = alt }
+				if alt != "" {
+					label = alt
+				}
 				meta := &InlineImageMeta{Index: nextIndex, Label: label, MXC: mxc, Mime: mime, Size: sz}
 				inlineImages = append(inlineImages, meta)
 				nextIndex++
@@ -1012,7 +1018,9 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 	if len(inlineImages) > 0 {
 		var b strings.Builder
 		b.WriteString(content.Body)
-		if content.Body != "" { b.WriteString("\n\n") }
+		if content.Body != "" {
+			b.WriteString("\n\n")
+		}
 		b.WriteString("Images:\n")
 		for _, im := range inlineImages {
 			b.WriteString(fmt.Sprintf(" - Image %d: %s\n", im.Index, im.Label))
@@ -1020,7 +1028,7 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 		content.Body = strings.TrimRight(b.String(), "\n")
 	}
 
-// Add HTML formatting if available
+	// Add HTML formatting if available
 	if origHTML != "" && origHTML != e.emailMessage.TextContent {
 		content.Format = event.FormatHTML
 		// Decode HTML entities in the formatted body before sending to Matrix
@@ -1046,53 +1054,53 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 		if minified, ok := boundedMinifyHTML(content.FormattedBody, HTMLMinificationTarget); ok {
 			content.FormattedBody = minified
 		}
-			// If still too big, drop HTML but preserve as attachment
-			if !withinMatrixLimit(content, MaxMatrixContentSize) {
-				content.FormattedBody = ""
-				// Add a small notice in the body.
-				if content.Body != "" {
-					content.Body += "\n\n[Full HTML too large to send inline — attached below]"
-				} else {
-					content.Body = "[Full HTML too large to send inline — attached below]"
-				}
-				htmlBytes := []byte(origHTML)
-				// Prepare a user-facing notice about data handling
-				var noticeText string
-				filename := "original-email.html"
-				mimeType := "text/html"
-				// Enforce upload size limit with gzip fallback for bodies
-				if e.processor.MaxUploadBytes > 0 && len(htmlBytes) > e.processor.MaxUploadBytes && e.processor.GzipLargeBodies {
-					if gz, ok := gzipBytes(htmlBytes); ok && len(gz) <= e.processor.MaxUploadBytes {
-						htmlBytes = gz
-						filename = "original-email.html.gz"
-						mimeType = "application/gzip"
-						noticeText = "HTML body exceeded upload limit — compressed and attached as .gz for review."
-					}
-				}
-				if e.processor.MaxUploadBytes > 0 && len(htmlBytes) > e.processor.MaxUploadBytes {
-					// Still too big — send a clear notice and skip
-					n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "HTML body too large to attach; content was omitted."}
-					appendPart("html-oversize-omitted", n)
-				} else {
-					mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, filename, mimeType)
-					if err != nil {
-						e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
-						n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
-						parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
-					} else {
-						if noticeText != "" {
-						n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: noticeText}
-						appendPart("html-inline-notice", n)
-						} else {
-							n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Full HTML was too large to send inline — attached for review."}
-							parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
-						}
-						att := &event.MessageEventContent{MsgType: event.MsgFile, Body: filename, URL: mxc}
-						att.Info = &event.FileInfo{MimeType: mimeType, Size: len(htmlBytes)}
-						appendPart("html-attachment", att)
-					}
+		// If still too big, drop HTML but preserve as attachment
+		if !withinMatrixLimit(content, MaxMatrixContentSize) {
+			content.FormattedBody = ""
+			// Add a small notice in the body.
+			if content.Body != "" {
+				content.Body += "\n\n[Full HTML too large to send inline — attached below]"
+			} else {
+				content.Body = "[Full HTML too large to send inline — attached below]"
+			}
+			htmlBytes := []byte(origHTML)
+			// Prepare a user-facing notice about data handling
+			var noticeText string
+			filename := "original-email.html"
+			mimeType := "text/html"
+			// Enforce upload size limit with gzip fallback for bodies
+			if e.processor.MaxUploadBytes > 0 && len(htmlBytes) > e.processor.MaxUploadBytes && e.processor.GzipLargeBodies {
+				if gz, ok := gzipBytes(htmlBytes); ok && len(gz) <= e.processor.MaxUploadBytes {
+					htmlBytes = gz
+					filename = "original-email.html.gz"
+					mimeType = "application/gzip"
+					noticeText = "HTML body exceeded upload limit — compressed and attached as .gz for review."
 				}
 			}
+			if e.processor.MaxUploadBytes > 0 && len(htmlBytes) > e.processor.MaxUploadBytes {
+				// Still too big — send a clear notice and skip
+				n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "HTML body too large to attach; content was omitted."}
+				appendPart("html-oversize-omitted", n)
+			} else {
+				mxc, _, err := intent.UploadMedia(ctx, "", htmlBytes, filename, mimeType)
+				if err != nil {
+					e.processor.log.Warn().Err(err).Msg("Failed to upload full HTML, sending notice instead")
+					n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Failed to upload full HTML content."}
+					parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+				} else {
+					if noticeText != "" {
+						n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: noticeText}
+						appendPart("html-inline-notice", n)
+					} else {
+						n := &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Full HTML was too large to send inline — attached for review."}
+						parts = append(parts, &bridgev2.ConvertedMessagePart{Type: event.EventMessage, Content: n})
+					}
+					att := &event.MessageEventContent{MsgType: event.MsgFile, Body: filename, URL: mxc}
+					att.Info = &event.FileInfo{MimeType: mimeType, Size: len(htmlBytes)}
+					appendPart("html-attachment", att)
+				}
+			}
+		}
 	}
 
 	// Step 2: If still too large (plain text is huge), truncate body and attach full text.
@@ -1171,7 +1179,9 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 			if chunk == "" {
 				// Fallback to raw slice to make progress
 				cut := PerEventTarget
-				if cut > len(remaining) { cut = len(remaining) }
+				if cut > len(remaining) {
+					cut = len(remaining)
+				}
 				chunk = remaining[:cut]
 			}
 			chunkContent := &event.MessageEventContent{MsgType: event.MsgText, Body: chunk}
@@ -1179,13 +1189,17 @@ add := func(mxc id.ContentURIString, mime string, sz int, defaultLabel string) s
 			for !withinMatrixLimit(chunkContent, MaxMatrixContentSize) && len(chunk) > 0 {
 				// Reduce chunk size by 10%
 				reduceBy := len(chunk) / 10
-				if reduceBy < 256 { reduceBy = 256 }
+				if reduceBy < 256 {
+					reduceBy = 256
+				}
 				newLen := len(chunk) - reduceBy
-				if newLen <= 0 { newLen = len(chunk) - 1 }
+				if newLen <= 0 {
+					newLen = len(chunk) - 1
+				}
 				chunk = chunk[:newLen]
 				chunkContent.Body = chunk
 			}
-parts = append(parts, &bridgev2.ConvertedMessagePart{ID: networkid.PartID(pid), Type: event.EventMessage, Content: chunkContent})
+			parts = append(parts, &bridgev2.ConvertedMessagePart{ID: networkid.PartID(pid), Type: event.EventMessage, Content: chunkContent})
 			// Advance remaining
 			if len(chunk) >= len(remaining) {
 				remaining = ""
@@ -1207,7 +1221,7 @@ parts = append(parts, &bridgev2.ConvertedMessagePart{ID: networkid.PartID(pid), 
 	for _, im := range inlineImages {
 		pid := fmt.Sprintf("inline-image-%d", im.Index)
 		// Build image content
-imgContent := &event.MessageEventContent{
+		imgContent := &event.MessageEventContent{
 			MsgType: event.MsgImage,
 			Body:    fmt.Sprintf("Image %d: %s", im.Index, im.Label),
 			URL:     im.MXC,
@@ -1216,7 +1230,7 @@ imgContent := &event.MessageEventContent{
 		parts = append(parts, &bridgev2.ConvertedMessagePart{ID: networkid.PartID(pid), Type: event.EventMessage, Content: imgContent})
 	}
 
-// Process attachments and upload them to Matrix (skip those used inline)
+	// Process attachments and upload them to Matrix (skip those used inline)
 	for idx, attachment := range e.emailMessage.Attachments {
 		if usedInline[idx] {
 			continue
@@ -1275,9 +1289,13 @@ func removeHTMLComments(s string) string {
 	// Remove <!-- ... --> blocks (non-greedy). This is simplistic and won't handle edge cases with "--" in text.
 	for {
 		start := strings.Index(s, "<!--")
-		if start == -1 { break }
+		if start == -1 {
+			break
+		}
 		end := strings.Index(s[start+4:], "-->")
-		if end == -1 { break }
+		if end == -1 {
+			break
+		}
 		end += start + 4
 		s = s[:start] + s[end+3:]
 	}
@@ -1289,7 +1307,9 @@ func stripTagContent(s, tag string) string {
 	close := "</" + tag + ">"
 	for {
 		start := strings.Index(strings.ToLower(s), open)
-		if start == -1 { break }
+		if start == -1 {
+			break
+		}
 		end := strings.Index(strings.ToLower(s[start:]), close)
 		if end == -1 { // no close, remove from start to end
 			s = s[:start]
@@ -1318,7 +1338,7 @@ func collapseWhitespace(s string) string {
 		prevWS = false
 		b.WriteRune(r)
 	}
-return b.String()
+	return b.String()
 }
 
 // gzipBytes compresses the input using gzip with default compression. Returns (gzipped, ok).
@@ -1338,12 +1358,12 @@ func gzipBytes(data []byte) ([]byte, bool) {
 func withinMatrixLimit(content *event.MessageEventContent, limit int) bool {
 	// Only include fields that are part of the event content
 	type minimal struct {
-		MsgType        event.MessageType `json:"msgtype,omitempty"`
-		Body           string            `json:"body,omitempty"`
-		Format         string            `json:"format,omitempty"`
-		FormattedBody  string            `json:"formatted_body,omitempty"`
-		URL            string            `json:"url,omitempty"`
-		Info           *event.FileInfo   `json:"info,omitempty"`
+		MsgType       event.MessageType `json:"msgtype,omitempty"`
+		Body          string            `json:"body,omitempty"`
+		Format        string            `json:"format,omitempty"`
+		FormattedBody string            `json:"formatted_body,omitempty"`
+		URL           string            `json:"url,omitempty"`
+		Info          *event.FileInfo   `json:"info,omitempty"`
 	}
 	m := minimal{
 		MsgType:       content.MsgType,
@@ -1389,7 +1409,6 @@ func truncateUTF8PreserveWords(s string, maxBytes int) (string, bool) {
 	}
 	return s[:cut], true
 }
-
 
 // convertAttachmentToMatrix uploads an email attachment to Matrix and returns a ConvertedMessagePart
 func (e *EmailMatrixEvent) convertAttachmentToMatrix(ctx context.Context, attachment *EmailAttachment, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessagePart, error) {
@@ -1484,7 +1503,6 @@ func normalizeContentLocation(s string) string {
 	return s
 }
 
-
 func findAttachmentByCID(atts []*EmailAttachment, cid string) int {
 	for i, a := range atts {
 		if a != nil && a.ContentID != "" {
@@ -1560,7 +1578,9 @@ func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridg
 	// Replace <img src="data:...">
 	out = reDataImg.ReplaceAllStringFunc(out, func(m string) string {
 		subs := reDataImg.FindStringSubmatch(m)
-		if len(subs) < 5 { return m }
+		if len(subs) < 5 {
+			return m
+		}
 		attr := subs[1]
 		quote := subs[2]
 		mimeType := strings.ToLower(subs[3])
@@ -1585,13 +1605,15 @@ func (e *EmailMatrixEvent) externalizeDataURIs(ctx context.Context, intent bridg
 			return m
 		}
 		replaced++
-metas = append(metas, &InlineImageMeta{Label: name, MXC: mxc, Mime: mimeType, Size: len(data)})
+		metas = append(metas, &InlineImageMeta{Label: name, MXC: mxc, Mime: mimeType, Size: len(data)})
 		return attr + quote + string(mxc) + quote
 	})
 	// Replace CSS url(data:...)
 	out = reDataCSS.ReplaceAllStringFunc(out, func(m string) string {
 		subs := reDataCSS.FindStringSubmatch(m)
-		if len(subs) < 3 { return m }
+		if len(subs) < 3 {
+			return m
+		}
 		mimeType := strings.ToLower(subs[1])
 		b64 := subs[2]
 		data, err := base64.StdEncoding.DecodeString(b64)
@@ -1611,7 +1633,7 @@ metas = append(metas, &InlineImageMeta{Label: name, MXC: mxc, Mime: mimeType, Si
 			return m
 		}
 		replaced++
-metas = append(metas, &InlineImageMeta{Label: name, MXC: mxc, Mime: mimeType, Size: len(data)})
+		metas = append(metas, &InlineImageMeta{Label: name, MXC: mxc, Mime: mimeType, Size: len(data)})
 		return "url(" + string(mxc) + ")"
 	})
 	return out, replaced, failed, metas
@@ -1623,29 +1645,29 @@ func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[str
 	// Replace cid: in img src and preserve the original quoting using pre-compiled regex
 	out = reImgCidSrc.ReplaceAllStringFunc(out, func(m string) string {
 		subs := reImgCidSrc.FindStringSubmatch(m)
-			if len(subs) > 3 {
-				attr := subs[1]   // src=
-				quote := subs[2]  // ' or "
-				cidRef := subs[3]
-				cid := normalizeCIDRef(cidRef)
-				if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
-					return attr + quote + mxc + quote
-				}
+		if len(subs) > 3 {
+			attr := subs[1]  // src=
+			quote := subs[2] // ' or "
+			cidRef := subs[3]
+			cid := normalizeCIDRef(cidRef)
+			if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
+				return attr + quote + mxc + quote
 			}
-			return m
-		})
-	
+		}
+		return m
+	})
+
 	// Replace CSS url(cid:...) using pre-compiled regex
 	out = reCSSCidURL.ReplaceAllStringFunc(out, func(m string) string {
 		subs := reCSSCidURL.FindStringSubmatch(m)
-			if len(subs) > 1 {
-				cid := normalizeCIDRef(subs[1])
-				if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
-					return "url(" + mxc + ")"
-				}
+		if len(subs) > 1 {
+			cid := normalizeCIDRef(subs[1])
+			if mxc, ok := cidToMXC[cid]; ok && mxc != "" {
+				return "url(" + mxc + ")"
 			}
-			return m
-		})
+		}
+		return m
+	})
 	// Replace content-location src references
 	reLoc, err := regexp.Compile(`(?i)src\s*=\s*(['\"])([^'\"]+)(['\"])`)
 	if err == nil {
@@ -1671,7 +1693,7 @@ func rewriteHTMLInline(html string, cidToMXC map[string]string, locToMXC map[str
 			return m
 		})
 	}
-return out
+	return out
 }
 
 // lightMinifyHTML removes comments and collapses whitespace conservatively to preserve formatting fidelity.
@@ -1695,7 +1717,7 @@ func simpleHTMLToText(s string) string {
 	reP := regexp.MustCompile(`(?is)<\s*/?p\s*>`)
 	s = reP.ReplaceAllString(s, "\n")
 	// Strip remaining tags
-	reTags := regexp.MustCompile(`(?is)<[^>]+>`) 
+	reTags := regexp.MustCompile(`(?is)<[^>]+>`)
 	s = reTags.ReplaceAllString(s, "")
 	// Decode all HTML entities (including numeric ones like &#847; and &zwnj;)
 	s = html.UnescapeString(s)
@@ -1710,26 +1732,25 @@ func simpleHTMLToText(s string) string {
 func filterInvisibleUnicode(s string) string {
 	var result strings.Builder
 	result.Grow(len(s)) // Pre-allocate capacity
-	
+
 	for _, r := range s {
 		// Skip format characters (Cf) and nonspacing marks (Mn) - covers most invisible chars
 		if !unicode.Is(unicode.Cf, r) && !unicode.Is(unicode.Mn, r) {
 			result.WriteRune(r)
 		}
 	}
-	
+
 	return result.String()
 }
-
 
 // generateParticipantChangeMessage creates a timeline message for participant changes
 func generateParticipantChangeMessage(thread *EmailThread) string {
 	if len(thread.AddedParticipants) == 0 && len(thread.RemovedParticipants) == 0 {
 		return ""
 	}
-	
+
 	var messages []string
-	
+
 	// Handle added participants
 	if len(thread.AddedParticipants) > 0 {
 		if len(thread.AddedParticipants) == 1 {
@@ -1738,7 +1759,7 @@ func generateParticipantChangeMessage(thread *EmailThread) string {
 			messages = append(messages, fmt.Sprintf("📧 %s joined the conversation", strings.Join(thread.AddedParticipants, ", ")))
 		}
 	}
-	
+
 	// Handle removed participants
 	if len(thread.RemovedParticipants) > 0 {
 		if len(thread.RemovedParticipants) == 1 {
@@ -1747,7 +1768,6 @@ func generateParticipantChangeMessage(thread *EmailThread) string {
 			messages = append(messages, fmt.Sprintf("📧 %s were removed from the conversation", strings.Join(thread.RemovedParticipants, ", ")))
 		}
 	}
-	
+
 	return strings.Join(messages, "\n")
 }
-

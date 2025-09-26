@@ -8,16 +8,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iFixRobots/emaildawg/pkg/common"
+	"github.com/iFixRobots/emaildawg/pkg/email"
+	"github.com/iFixRobots/emaildawg/pkg/imap"
+	"github.com/iFixRobots/emaildawg/pkg/matrix"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"github.com/iFixRobots/emaildawg/pkg/imap"
-	"github.com/iFixRobots/emaildawg/pkg/matrix"
-	"github.com/iFixRobots/emaildawg/pkg/email"
-	"github.com/iFixRobots/emaildawg/pkg/common"
 )
 
 type EmailConnector struct {
@@ -49,7 +49,7 @@ func (ec *EmailConnector) GetName() bridgev2.BridgeName {
 
 func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	ec.Bridge = bridge
-	
+
 	// Initialize config with default values
 	imapConfig := IMAPConfig{
 		DefaultTimeout:            30,
@@ -57,7 +57,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		StartupBackfillMax:        25,
 		InitialIdleTimeoutSeconds: 3,
 	}
-	
+
 	ec.Config = Config{
 		IMAP: imapConfig,
 		Network: NetworkConfig{
@@ -96,7 +96,6 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 		ec.Config.Logging.Sanitized = false
 	}
 
-	
 	// Ensure ./data directory exists for local SQLite files and sidecar WAL/SHM files
 	dataDir := filepath.Join(".", "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -110,7 +109,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	ec.DB = &EmailAccountQuery{
 		DB: bridge.DB,
 	}
-	
+
 	// Create database tables
 	ctx := context.Background()
 	if err := ec.DB.CreateTable(ctx); err != nil {
@@ -133,14 +132,14 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	// Initialize managers
 	logger := bridge.Log.With().Str("component", "imap").Logger()
 	ec.IMAPManager = imap.NewManager(bridge, &logger, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
-	
+
 	roomLogger := bridge.Log.With().Str("component", "matrix").Logger()
 	ec.RoomManager = matrix.NewRoomManager(&roomLogger)
-	
+
 	// Prefer a DB-backed resolver that can find existing portals by prior bridged messages
 	resolver := &DBThreadMetadataResolver{Bridge: bridge, Log: &roomLogger, Network: "email"}
 	ec.ThreadManager = email.NewThreadManager(resolver)
-	
+
 	// Initialize email processor and wire it to the IMAP manager
 	processorLogger := bridge.Log.With().Str("component", "email_processor").Logger()
 	ec.Processor = email.NewProcessor(&processorLogger, ec.ThreadManager, ec.Config.Logging.Sanitized, ec.Config.Logging.PseudonymSecret)
@@ -150,7 +149,7 @@ func (ec *EmailConnector) Init(bridge *bridgev2.Bridge) {
 	}
 	ec.Processor.GzipLargeBodies = ec.Config.Processing.GzipLargeBodies
 	ec.IMAPManager.SetProcessor(ec.Processor)
-	
+
 	// Add commands with connector context
 	ec.Bridge.Commands.(*commands.Processor).AddHandlers(
 		ec.createCommands()...,
@@ -243,12 +242,12 @@ func (ec *EmailConnector) Start(ctx context.Context) error {
 // Stop gracefully shuts down the EmailConnector and all IMAP connections
 func (ec *EmailConnector) Stop() {
 	ec.Bridge.Log.Info().Msg("Email connector stopping...")
-	
+
 	// Stop all IMAP clients
 	if ec.IMAPManager != nil {
 		ec.IMAPManager.StopAll()
 	}
-	
+
 	ec.Bridge.Log.Info().Msg("Email connector stopped")
 }
 
@@ -269,9 +268,9 @@ func (ec *EmailConnector) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost
 		userIDStr = userIDStr[6:]
 	}
 	return &bridgev2.UserInfo{
-		Name:      &userIDStr,
-		Avatar:    nil,
-		IsBot:     nil,
+		Name:        &userIDStr,
+		Avatar:      nil,
+		IsBot:       nil,
 		Identifiers: []string{userIDStr},
 	}, nil
 }
@@ -297,12 +296,12 @@ func (ec *EmailConnector) GetChatInfo(ctx context.Context, portal *bridgev2.Port
 
 	// Start with empty member list - participants will be added when emails are processed
 	chatMembers := make([]bridgev2.ChatMember, 0)
-	
+
 	chatInfo := &bridgev2.ChatInfo{
 		Name:   &roomName,
 		Topic:  &roomTopic,
 		Avatar: nil,
-		Type:  ptr.Ptr(database.RoomTypeDefault),
+		Type:   ptr.Ptr(database.RoomTypeDefault),
 		Members: &bridgev2.ChatMemberList{
 			Members: chatMembers,
 			IsFull:  true,
@@ -332,7 +331,6 @@ func (ec *EmailConnector) GetDBMetaTypes() database.MetaTypes {
 	return database.MetaTypes{}
 }
 
-
 func (ec *EmailConnector) GetBridgeInfoVersion() (int, int) {
 	return 0, 1 // Version 0.1
 }
@@ -344,7 +342,6 @@ func (ec *EmailConnector) GetLoginFlows() []bridgev2.LoginFlow {
 		ID:          "email-password",
 	}}
 }
-
 
 // Helper functions for creating network IDs
 func MakeUserID(email string) networkid.UserID {
