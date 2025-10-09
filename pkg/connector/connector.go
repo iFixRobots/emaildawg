@@ -184,7 +184,7 @@ func (ec *EmailConnector) createCommands() []commands.CommandHandler {
 			},
 		},
 		&commands.FullHandler{
-			Func: fnLogout,
+			Func: func(ce *commands.Event) { fnLogout(ce, ec) },
 			Name: "logout",
 			Help: commands.HelpMeta{
 				Section:     HelpSectionAuth,
@@ -200,7 +200,7 @@ func (ec *EmailConnector) createCommands() []commands.CommandHandler {
 			},
 		},
 		&commands.FullHandler{
-			Func: fnSync,
+			Func: func(ce *commands.Event) { fnSync(ce, ec) },
 			Name: "sync",
 			Help: commands.HelpMeta{
 				Section:     HelpSectionInfo,
@@ -208,7 +208,7 @@ func (ec *EmailConnector) createCommands() []commands.CommandHandler {
 			},
 		},
 		&commands.FullHandler{
-			Func: fnReconnect,
+			Func: func(ce *commands.Event) { fnReconnect(ce, ec) },
 			Name: "reconnect",
 			Help: commands.HelpMeta{
 				Section:     HelpSectionAdmin,
@@ -224,7 +224,7 @@ func (ec *EmailConnector) createCommands() []commands.CommandHandler {
 			},
 		},
 		&commands.FullHandler{
-			Func: fnPassphrase,
+			Func: func(ce *commands.Event) { fnPassphrase(ce, ec) },
 			Name: "passphrase",
 			Help: commands.HelpMeta{
 				Section:     HelpSectionAdmin,
