@@ -43,7 +43,7 @@ func NetworkRetryConfig() RetryConfig {
 // IDLEStartupRetryConfig returns retry config optimized for IMAP IDLE startup operations
 func IDLEStartupRetryConfig() RetryConfig {
 	return RetryConfig{
-		MaxAttempts:   3,  // Limited attempts to prevent endless loops
+		MaxAttempts:   3, // Limited attempts to prevent endless loops
 		InitialDelay:  500 * time.Millisecond,
 		MaxDelay:      5 * time.Second,
 		BackoffFactor: 2.0,
@@ -70,37 +70,37 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 	if config.MaxDelay < config.InitialDelay {
 		config.MaxDelay = config.InitialDelay
 	}
-	
+
 	var lastErr error
-	
+
 	for attempt := 0; attempt < config.MaxAttempts; attempt++ {
 		// Execute the function
 		err := fn()
 		if err == nil {
 			return nil // Success
 		}
-		
+
 		lastErr = err
-		
+
 		// Don't retry on the last attempt
 		if attempt == config.MaxAttempts-1 {
 			break
 		}
-		
+
 		// Check if this error should be retried based on its category
 		if !ShouldRetry(err) {
 			// Don't retry authentication or permanent errors
 			return err
 		}
-		
+
 		// Check if context is cancelled
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		
+
 		// Calculate delay with exponential backoff
 		delay := config.calculateDelay(attempt)
-		
+
 		// For circuit breaker errors, use a longer minimum delay to allow recovery
 		if err == ErrCircuitBreakerOpen || err == ErrTooManyRequests {
 			// Circuit breaker timeout is typically 2 minutes, so wait at least that long
@@ -109,7 +109,7 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 				delay = circuitBreakerWait
 			}
 		}
-		
+
 		// Wait with context cancellation support
 		select {
 		case <-time.After(delay):
@@ -118,7 +118,7 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 			return ctx.Err()
 		}
 	}
-	
+
 	return lastErr
 }
 
@@ -126,11 +126,11 @@ func RetryWithBackoff(ctx context.Context, config RetryConfig, fn func() error) 
 func (c RetryConfig) calculateDelay(attempt int) time.Duration {
 	// Calculate exponential backoff delay with overflow protection
 	var delay float64
-	
+
 	// Compute exponent safely
 	e := float64(attempt) * math.Log(c.BackoffFactor)
-	maxE := math.Log(float64(c.MaxDelay)/float64(c.InitialDelay))
-	
+	maxE := math.Log(float64(c.MaxDelay) / float64(c.InitialDelay))
+
 	// Check for overflow/overshoot or invalid values
 	if math.IsNaN(e) || math.IsInf(e, 0) || e > maxE {
 		delay = float64(c.MaxDelay)
@@ -147,25 +147,25 @@ func (c RetryConfig) calculateDelay(attempt int) time.Duration {
 			}
 		}
 	}
-	
+
 	// Add jitter if enabled, ensuring it doesn't exceed MaxDelay
 	if c.Jitter {
 		// Add cryptographically secure random jitter up to 25% of the delay
 		jitterRange := delay * 0.25
 		jitter := secureRandFloat64() * jitterRange
 		delay += jitter
-		
+
 		// Ensure jitter doesn't push us past MaxDelay
 		if delay > float64(c.MaxDelay) {
 			delay = float64(c.MaxDelay)
 		}
 	}
-	
+
 	// Sanitize NaN/Inf before converting to Duration
 	if math.IsNaN(delay) || math.IsInf(delay, 0) || delay < 0 {
 		delay = float64(c.MaxDelay)
 	}
-	
+
 	return time.Duration(delay)
 }
 
@@ -174,9 +174,9 @@ func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	errStr := err.Error()
-	
+
 	// Network-level errors that are usually transient
 	retryablePatterns := []string{
 		"connection refused",
@@ -196,35 +196,35 @@ func IsRetryableError(err error) bool {
 		"cannot read tag",
 		"unexpected eof",
 	}
-	
+
 	for _, pattern := range retryablePatterns {
 		if contains(errStr, pattern) {
 			return true
 		}
 	}
-	
+
 	// IMAP-specific transient errors with specific matching to avoid false positives
 	imapRetryablePatterns := []string{
-		"* bye",                           // Server connection terminated (start of line)
-		"no unavailable",                  // IMAP NO response with UNAVAILABLE
-		"bad serverbug",                   // IMAP BAD response with SERVERBUG  
-		"no contactadmin",                 // IMAP NO response with CONTACTADMIN
-		"bad [clientbug]",                 // IMAP BAD response with [CLIENTBUG]
-		"server temporarily unavailable",  // Full phrase match
+		"* bye",                                // Server connection terminated (start of line)
+		"no unavailable",                       // IMAP NO response with UNAVAILABLE
+		"bad serverbug",                        // IMAP BAD response with SERVERBUG
+		"no contactadmin",                      // IMAP NO response with CONTACTADMIN
+		"bad [clientbug]",                      // IMAP BAD response with [CLIENTBUG]
+		"server temporarily unavailable",       // Full phrase match
 		"temporary failure in name resolution", // DNS issues
-		"mailbox unavailable",             // Mailbox locked/busy
-		"idle already",                    // IDLE command already running
-		"already running",                 // Generic already running state
-		"idle command already",            // IDLE command already in progress
+		"mailbox unavailable",                  // Mailbox locked/busy
+		"idle already",                         // IDLE command already running
+		"already running",                      // Generic already running state
+		"idle command already",                 // IDLE command already in progress
 	}
-	
+
 	// Use more specific matching for IMAP patterns
 	for _, pattern := range imapRetryablePatterns {
 		if matchesIMAPPattern(errStr, pattern) {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -251,23 +251,23 @@ func contains(s, substr string) bool {
 func matchesIMAPPattern(errStr, pattern string) bool {
 	errLower := strings.ToLower(errStr)
 	patternLower := strings.ToLower(pattern)
-	
+
 	// For patterns starting with "* ", match at beginning of line
 	if strings.HasPrefix(patternLower, "* ") {
 		return strings.HasPrefix(errLower, patternLower) ||
-			   strings.Contains(errLower, "\n"+patternLower)
+			strings.Contains(errLower, "\n"+patternLower)
 	}
-	
+
 	// For patterns with response codes (NO, BAD), ensure word boundaries
-	if strings.HasPrefix(patternLower, "no ") || 
-	   strings.HasPrefix(patternLower, "bad ") {
+	if strings.HasPrefix(patternLower, "no ") ||
+		strings.HasPrefix(patternLower, "bad ") {
 		// Match at word boundaries to avoid false positives
 		return strings.Contains(errLower, patternLower) &&
-			   (strings.HasPrefix(errLower, patternLower) ||
+			(strings.HasPrefix(errLower, patternLower) ||
 				strings.Contains(errLower, " "+patternLower) ||
 				strings.Contains(errLower, "\n"+patternLower))
 	}
-	
+
 	// For other patterns, use exact phrase matching
 	return strings.Contains(errLower, patternLower)
 }
@@ -277,7 +277,7 @@ type ErrorCategory int
 
 const (
 	ErrorTemporary ErrorCategory = iota
-	ErrorPermanent 
+	ErrorPermanent
 	ErrorAuthentication
 	ErrorNetwork
 	ErrorTimeout
@@ -288,13 +288,13 @@ func CategorizeError(err error) ErrorCategory {
 	if err == nil {
 		return ErrorTemporary
 	}
-	
+
 	errStr := strings.ToLower(err.Error())
-	
+
 	// Authentication errors - don't retry these
 	authPatterns := []string{
 		"authentication failed",
-		"login failed", 
+		"login failed",
 		"invalid credentials",
 		"bad credentials",
 		"access denied",
@@ -302,58 +302,58 @@ func CategorizeError(err error) ErrorCategory {
 		"authentication error",
 		"authenticationfailed",
 	}
-	
+
 	for _, pattern := range authPatterns {
 		if contains(errStr, pattern) {
 			return ErrorAuthentication
 		}
 	}
-	
+
 	// Network errors - usually retryable
 	networkPatterns := []string{
 		"connection refused",
-		"connection reset", 
+		"connection reset",
 		"network unreachable",
 		"host unreachable",
 		"no such host",
 		"broken pipe",
 		"connection lost",
 	}
-	
+
 	for _, pattern := range networkPatterns {
 		if contains(errStr, pattern) {
 			return ErrorNetwork
 		}
 	}
-	
+
 	// Timeout errors - retryable
 	timeoutPatterns := []string{
 		"timeout",
 		"i/o timeout",
 		"deadline exceeded",
 	}
-	
+
 	for _, pattern := range timeoutPatterns {
 		if contains(errStr, pattern) {
 			return ErrorTimeout
 		}
 	}
-	
+
 	// Server-side permanent errors
 	permanentPatterns := []string{
-		"no mailbox", 
+		"no mailbox",
 		"mailbox does not exist",
 		"permission denied",
 		"quota exceeded",
 		"invalid mailbox",
 	}
-	
+
 	for _, pattern := range permanentPatterns {
 		if contains(errStr, pattern) {
 			return ErrorPermanent
 		}
 	}
-	
+
 	// Default to temporary for unknown errors
 	return ErrorTemporary
 }
@@ -364,9 +364,9 @@ func ShouldRetry(err error) bool {
 	if err == ErrCircuitBreakerOpen || err == ErrTooManyRequests {
 		return true
 	}
-	
+
 	category := CategorizeError(err)
-	
+
 	switch category {
 	case ErrorTemporary, ErrorNetwork, ErrorTimeout:
 		return true

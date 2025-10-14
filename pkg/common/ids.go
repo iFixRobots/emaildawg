@@ -2,8 +2,8 @@ package common
 
 import (
 	"fmt"
-	"strings"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"strings"
 )
 
 // EmailToGhostID converts an email address to a Matrix ghost user ID in a single, canonical place.
@@ -19,14 +19,14 @@ func EmailToGhostID(email string) networkid.UserID {
 func RecoverToError(errCh chan<- error) {
 	if r := recover(); r != nil {
 		var err error
-		
+
 		// Preserve original error if the panic value is already an error
 		if panicErr, ok := r.(error); ok {
 			err = fmt.Errorf("panic recovered: %w", panicErr)
 		} else {
 			err = fmt.Errorf("panic recovered: %v", r)
 		}
-		
+
 		// Safe send - non-blocking to prevent deadlocks and handle closed/nil channels
 		if errCh != nil {
 			select {

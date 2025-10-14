@@ -129,18 +129,18 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 	if connector.IMAPManager != nil {
 		connector.IMAPManager.StopAll()
 	}
-	
+
 	// Get current working directory for secure path resolution
 	cwd, err := os.Getwd()
 	if err != nil {
 		ce.Reply("❌ Failed to get current directory: %s", err.Error())
 		return
 	}
-	
+
 	// Try common DB file locations using absolute paths for security
 	relativeCandidates := []string{
 		"emaildawg.db",
-		"emaildawg.db-wal", 
+		"emaildawg.db-wal",
 		"emaildawg.db-shm",
 		"data/emaildawg.db",
 		"data/emaildawg.db-wal",
@@ -149,7 +149,7 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 		"sh-emaildawg.db-wal",
 		"sh-emaildawg.db-shm",
 	}
-	
+
 	var candidates []string
 	for _, relPath := range relativeCandidates {
 		absPath := filepath.Join(cwd, relPath)
@@ -158,7 +158,7 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 			candidates = append(candidates, cleanPath)
 		}
 	}
-	
+
 	removed := 0
 	for _, path := range candidates {
 		if err := os.Remove(path); err == nil {
@@ -185,15 +185,15 @@ func fnLogin(ce *commands.Event, connector *EmailConnector) {
 	// Check if the user provided arguments in the command
 	args := strings.TrimSpace(ce.RawArgs)
 	if args != "" {
-		// Parse text arguments: email:user@domain.com password:pass or password:"quoted pass"
-		email, password, err := parseLoginArgs(args)
+		// Parse text arguments: email:user@domain.com password:pass imap_host:imap.example.com
+		email, password, imapHost, err := parseLoginArgs(args)
 		if err != nil {
-			ce.Reply("❌ %s\n\n**Usage:** `!email login email:your@email.com password:yourpassword`\n**Or:** `!email login email:your@email.com password:\"password with spaces\"`", err.Error())
+			ce.Reply("❌ %s\n\n**Usage:** `!email login email:your@email.com password:yourpassword [imap_host:imap.server]`\n**Or:** `!email login email:your@email.com password:\"password with spaces\" [imap_host:imap.server]`", err.Error())
 			return
 		}
 
 		// Process the text-based login
-		err = processTextLogin(ctx, ce, email, password, connector)
+		err = processTextLogin(ctx, ce, email, password, imapHost, connector)
 		if err != nil {
 			ce.Reply("❌ Login failed: %s", err.Error())
 		}
@@ -343,7 +343,14 @@ Need help? Use ` + "`!email help`" + ` for more information.
 		if p, ok := imap.CommonProviders[domain]; ok {
 			provider = p.Name
 		} else {
+			hostName := strings.ToLower(strings.TrimSpace(account.Host))
 			provider = "Custom IMAP"
+			for _, common := range imap.CommonProviders {
+				if strings.EqualFold(common.Host, hostName) {
+					provider = fmt.Sprintf("%s (custom domain)", common.Name)
+					break
+				}
+			}
 		}
 
 		if hasStatus {
@@ -429,7 +436,7 @@ func fnSync(ce *commands.Event) {
 				// Create individual context for each sync operation
 				syncCtx, syncCancel := context.WithTimeout(ctx, 30*time.Second)
 				done := make(chan error, 1)
-				
+
 				go func() {
 					defer syncCancel() // Ensure context is cancelled when goroutine exits
 					select {
@@ -550,7 +557,7 @@ func fnReconnect(ce *commands.Event) {
 }
 
 // parseLoginArgs parses command arguments in the format: email:user@domain.com password:pass or password:"quoted pass"
-func parseLoginArgs(args string) (email, password string, err error) {
+func parseLoginArgs(args string) (email, password, imapHost string, err error) {
 	// Split by spaces but preserve quoted strings
 	parts := parseQuotedArgs(args)
 
@@ -559,22 +566,25 @@ func parseLoginArgs(args string) (email, password string, err error) {
 			email = strings.TrimPrefix(part, "email:")
 		} else if strings.HasPrefix(part, "password:") {
 			password = strings.TrimPrefix(part, "password:")
+		} else if strings.HasPrefix(part, "imap_host:") {
+			temp := strings.TrimPrefix(part, "imap_host:")
+			imapHost = strings.TrimSpace(temp)
 		}
 	}
 
 	if email == "" {
-		return "", "", fmt.Errorf("email is required")
+		return "", "", "", fmt.Errorf("email is required")
 	}
 	if password == "" {
-		return "", "", fmt.Errorf("password is required")
+		return "", "", "", fmt.Errorf("password is required")
 	}
 
 	// Validate email format
 	if !strings.Contains(email, "@") || !strings.Contains(email, ".") {
-		return "", "", fmt.Errorf("invalid email format")
+		return "", "", "", fmt.Errorf("invalid email format")
 	}
 
-	return email, password, nil
+	return email, password, imapHost, nil
 }
 
 // parseQuotedArgs splits arguments while preserving quoted strings
@@ -612,7 +622,7 @@ func parseQuotedArgs(args string) []string {
 }
 
 // processTextLogin processes a text-based login using the same flow as the interactive login
-func processTextLogin(ctx context.Context, ce *commands.Event, email, password string, connector *EmailConnector) error {
+func processTextLogin(ctx context.Context, ce *commands.Event, email, password, imapHost string, connector *EmailConnector) error {
 	// Create a login process
 	loginProcess, err := connector.CreateLogin(ctx, ce.User, "email-password")
 	if err != nil {
@@ -628,7 +638,7 @@ func processTextLogin(ctx context.Context, ce *commands.Event, email, password s
 	// Validate inputs before setting (additional validation beyond parseLoginArgs)
 	email = strings.TrimSpace(email)
 	password = strings.TrimSpace(password)
-	
+
 	if len(email) > 256 {
 		return fmt.Errorf("email address too long (max 256 characters)")
 	}
@@ -648,6 +658,9 @@ func processTextLogin(ctx context.Context, ce *commands.Event, email, password s
 	inputData := map[string]string{
 		"email":    email,
 		"password": password,
+	}
+	if strings.TrimSpace(imapHost) != "" {
+		inputData["imap_host"] = imapHost
 	}
 
 	step, err := emailLogin.SubmitUserInput(ctx, inputData)
@@ -670,8 +683,8 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 	return prefix + `🔐 **Email Bridge Login**
 
 **Method 1: Quick Command**
-` + "`!email login email:your@email.com password:yourpassword`" + `
-` + "`!email login email:your@email.com password:\"password with spaces\"`" + `
+` + "`!email login email:your@email.com password:yourpassword [imap_host:imap.server]`" + `
+` + "`!email login email:your@email.com password:\"password with spaces\" [imap_host:imap.server]`" + `
 
 **Method 2: Form Fields (if supported by your client)**
 📧 **Please enter your email credentials using the form fields below.**
@@ -689,7 +702,7 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 
 **Popular Providers Supported:**
 ✅ Gmail, Yahoo, Outlook, iCloud, FastMail - Auto-configured
-✅ Custom IMAP servers - Auto-detected
+✅ Custom IMAP servers - Auto-detected or specify via imap_host
 
 *The bridge will test your IMAP connection automatically after you submit your credentials.*
 
@@ -697,7 +710,7 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 }
 
 func fnPassphrase(ce *commands.Event) {
-	
+
 	// Parse command arguments
 	if len(ce.Args) == 0 {
 		// Show current status and usage
@@ -706,16 +719,16 @@ func fnPassphrase(ce *commands.Event) {
 			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
 			return
 		}
-		
+
 		// Check if passphrase file exists
 		exists := false
 		if _, err := os.Stat(passphrasePath); err == nil {
 			exists = true
 		}
-		
+
 		// Check if environment variable is set
 		envSet := strings.TrimSpace(os.Getenv("EMAILDAWG_PASSPHRASE")) != ""
-		
+
 		ce.Reply(`🔐 **Encryption Passphrase Status**
 
 **Environment Variable:** %s
@@ -723,19 +736,19 @@ func fnPassphrase(ce *commands.Event) {
 **File Location:** %s
 
 **Usage:**
-• ` + "`!email passphrase generate`" + ` - Generate new secure passphrase
-• ` + "`!email passphrase show-location`" + ` - Show passphrase file path  
-• ` + "`!email passphrase set <passphrase>`" + ` - Set custom passphrase
+• `+"`!email passphrase generate`"+` - Generate new secure passphrase
+• `+"`!email passphrase show-location`"+` - Show passphrase file path  
+• `+"`!email passphrase set <passphrase>`"+` - Set custom passphrase
 
-**Security Note:** Your email passwords are encrypted using this passphrase. EmailDawg automatically generates one if neither environment variable nor file exists.`, 
+**Security Note:** Your email passwords are encrypted using this passphrase. EmailDawg automatically generates one if neither environment variable nor file exists.`,
 			map[bool]string{true: "✅ Set", false: "❌ Not set"}[envSet],
 			map[bool]string{true: "✅ Exists", false: "❌ Not found"}[exists],
 			passphrasePath)
 		return
 	}
-	
+
 	command := strings.ToLower(ce.Args[0])
-	
+
 	switch command {
 	case "generate":
 		// Generate new passphrase
@@ -744,11 +757,11 @@ func fnPassphrase(ce *commands.Event) {
 			ce.Reply("❌ Failed to generate passphrase: %s", err.Error())
 			return
 		}
-		
+
 		passphrasePath, _ := getPassphraseFilePath()
 		ce.Reply(`✅ **New secure passphrase generated!**
 
-**Passphrase:** ` + "`%s`" + `
+**Passphrase:** `+"`%s`"+`
 **Stored at:** %s
 **Permissions:** 0600 (owner read/write only)
 
@@ -757,22 +770,22 @@ func fnPassphrase(ce *commands.Event) {
 **Next Steps:**
 • Your existing email accounts will continue to work
 • New logins will use this passphrase for encryption
-• You can also set EMAILDAWG_PASSPHRASE environment variable for production use`, 
+• You can also set EMAILDAWG_PASSPHRASE environment variable for production use`,
 			passphrase, passphrasePath)
-			
+
 	case "show-location":
 		passphrasePath, err := getPassphraseFilePath()
 		if err != nil {
 			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
 			return
 		}
-		
+
 		// Check if file exists
 		exists := false
 		if _, err := os.Stat(passphrasePath); err == nil {
 			exists = true
 		}
-		
+
 		ce.Reply(`📍 **Passphrase File Location**
 
 **Path:** %s
@@ -786,40 +799,40 @@ func fnPassphrase(ce *commands.Event) {
 You can also set the EMAILDAWG_PASSPHRASE environment variable instead of using a file.`,
 			passphrasePath,
 			map[bool]string{true: "✅ File exists", false: "❌ File not found"}[exists])
-			
+
 	case "set":
 		if len(ce.Args) < 2 {
 			ce.Reply("❌ Missing passphrase argument.\n\n**Usage:** `!email passphrase set <your-passphrase>`")
 			return
 		}
-		
+
 		// Join remaining args as the passphrase (in case it has spaces)
 		passphrase := strings.Join(ce.Args[1:], " ")
 		if len(passphrase) < 8 {
 			ce.Reply("❌ Passphrase must be at least 8 characters long for security.")
 			return
 		}
-		
+
 		// Get passphrase file path
 		passphrasePath, err := getPassphraseFilePath()
 		if err != nil {
 			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
 			return
 		}
-		
+
 		// Create config directory with secure permissions
 		configDir := filepath.Dir(passphrasePath)
 		if err := os.MkdirAll(configDir, 0o700); err != nil {
 			ce.Reply("❌ Failed to create config directory: %s", err.Error())
 			return
 		}
-		
+
 		// Write passphrase file with secure permissions
 		if err := os.WriteFile(passphrasePath, []byte(passphrase), 0o600); err != nil {
 			ce.Reply("❌ Failed to write passphrase file: %s", err.Error())
 			return
 		}
-		
+
 		ce.Reply(`✅ **Custom passphrase set successfully!**
 
 **Stored at:** %s
@@ -831,7 +844,7 @@ You can also set the EMAILDAWG_PASSPHRASE environment variable instead of using 
 • Make sure to remember this passphrase or store it securely
 • You can override this by setting EMAILDAWG_PASSPHRASE environment variable`,
 			passphrasePath)
-			
+
 	default:
 		ce.Reply("❌ Unknown command: %s\n\n**Available commands:**\n• `generate` - Generate new secure passphrase\n• `show-location` - Show passphrase file location\n• `set <passphrase>` - Set custom passphrase", command)
 	}

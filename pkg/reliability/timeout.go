@@ -14,12 +14,12 @@ type Logger interface {
 
 // TimeoutConfig holds timeout settings for different operations
 type TimeoutConfig struct {
-	Connect    time.Duration
-	Read       time.Duration
-	Write      time.Duration
-	Idle       time.Duration
-	Command    time.Duration
-	Total      time.Duration
+	Connect time.Duration
+	Read    time.Duration
+	Write   time.Duration
+	Idle    time.Duration
+	Command time.Duration
+	Total   time.Duration
 }
 
 // DefaultTimeouts returns sensible default timeouts
@@ -38,9 +38,9 @@ func DefaultTimeouts() TimeoutConfig {
 func IMAPTimeouts() TimeoutConfig {
 	return TimeoutConfig{
 		Connect: 45 * time.Second,
-		Read:    120 * time.Second,  // IMAP can be slow
+		Read:    120 * time.Second, // IMAP can be slow
 		Write:   60 * time.Second,
-		Idle:    30 * time.Minute,   // IDLE can run long
+		Idle:    30 * time.Minute, // IDLE can run long
 		Command: 45 * time.Second,
 		Total:   15 * time.Minute,
 	}
@@ -51,7 +51,7 @@ func IMAPTimeouts() TimeoutConfig {
 // Callers must ensure fn() checks ctx.Done() periodically to avoid resource leaks.
 func runWithCtx(ctx context.Context, logger Logger, fn func(context.Context) error) error {
 	done := make(chan error, 1)
-	
+
 	go func() {
 		defer func() {
 			// Recover from any panic in fn to prevent goroutine leak
@@ -66,7 +66,7 @@ func runWithCtx(ctx context.Context, logger Logger, fn func(context.Context) err
 				}
 			}
 		}()
-		
+
 		// Execute function and send result (non-blocking to prevent goroutine leak)
 		err := fn(ctx)
 		select {
@@ -77,7 +77,7 @@ func runWithCtx(ctx context.Context, logger Logger, fn func(context.Context) err
 			// This is expected behavior when function completes after timeout
 		}
 	}()
-	
+
 	select {
 	case err := <-done:
 		return err
@@ -98,7 +98,7 @@ func WithTimeout(parentCtx context.Context, timeout time.Duration, logger Logger
 	return runWithCtx(ctx, logger, fn)
 }
 
-// WithDeadline executes a function with a deadline  
+// WithDeadline executes a function with a deadline
 func WithDeadline(parentCtx context.Context, deadline time.Time, logger Logger, fn func(ctx context.Context) error) error {
 	ctx, cancel := context.WithDeadline(parentCtx, deadline)
 	defer cancel()

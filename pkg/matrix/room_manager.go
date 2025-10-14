@@ -12,8 +12,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
-	"github.com/iFixRobots/emaildawg/pkg/email"
 	"github.com/iFixRobots/emaildawg/pkg/common"
+	"github.com/iFixRobots/emaildawg/pkg/email"
 )
 
 // RoomManager handles Matrix room creation and management for email threads
@@ -108,7 +108,7 @@ func (rm *RoomManager) GetChatInfoForThread(ctx context.Context, thread *email.E
 		Int("member_count", len(memberMap)).
 		Msg("Created ChatInfo for email thread")
 
-return chatInfo, nil
+	return chatInfo, nil
 }
 
 // BuildReadOnlyPowerLevels centralizes the power level configuration for email threads.
@@ -128,10 +128,10 @@ func BuildReadOnlyPowerLevels() *bridgev2.PowerLevelOverrides {
 			event.StateTopic:      101,
 			event.StateRoomAvatar: 101,
 			// Block all users from sending messages - bridge framework handles ghost sending
-			event.EventMessage:    101,
+			event.EventMessage: 101,
 			// Keep reactions/redactions restricted to prevent Matrix-side edits by default
-			event.EventReaction:   101,
-			event.EventRedaction:  101,
+			event.EventReaction:  101,
+			event.EventRedaction: 101,
 		},
 	}
 }
@@ -141,7 +141,7 @@ func (rm *RoomManager) formatRoomName(subject string) string {
 	// Remove common email prefixes
 	subject = strings.TrimSpace(subject)
 	prefixes := []string{"Re: ", "RE: ", "Fwd: ", "FWD: ", "Fw: ", "FW: "}
-	
+
 	for {
 		trimmed := false
 		for _, prefix := range prefixes {
@@ -155,22 +155,18 @@ func (rm *RoomManager) formatRoomName(subject string) string {
 			break
 		}
 	}
-	
+
 	// Limit length and clean up
 	if len(subject) > 80 {
 		subject = subject[:77] + "..."
 	}
-	
+
 	if subject == "" {
 		subject = "Email Thread"
 	}
-	
+
 	return subject
 }
-
-
-
-
 
 // Note: UpdateRoomParticipants and SendEmailMessage will be handled by the EmailConnector
 // using the bridgev2 framework's built-in room and message management capabilities.
