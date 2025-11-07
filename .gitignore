@@ -24,6 +24,7 @@ registration.yaml
 *.sqlite
 *.sqlite3
 *.log
+data/
 
 # OS files
 .DS_Store
