@@ -143,7 +143,7 @@ func BuildFolderSelectionPrompt(folders []imap.FolderInfo, providerName string) 
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("✅ Connected to **%s** successfully!\n\n", providerName))
-	sb.WriteString("📁 **Choose which folders to monitor:**\n\n")
+	sb.WriteString("📁 **Choose which folders or labels to monitor:**\n\n")
 	sb.WriteString(imap.FormatFolderList(folders))
 	sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 	sb.WriteString("Reply with folder number(s) separated by commas.\n")
