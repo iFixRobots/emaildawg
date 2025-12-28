@@ -129,18 +129,18 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 	if connector.IMAPManager != nil {
 		connector.IMAPManager.StopAll()
 	}
-	
+
 	// Get current working directory for secure path resolution
 	cwd, err := os.Getwd()
 	if err != nil {
 		ce.Reply("❌ Failed to get current directory: %s", err.Error())
 		return
 	}
-	
+
 	// Try common DB file locations using absolute paths for security
 	relativeCandidates := []string{
 		"emaildawg.db",
-		"emaildawg.db-wal", 
+		"emaildawg.db-wal",
 		"emaildawg.db-shm",
 		"data/emaildawg.db",
 		"data/emaildawg.db-wal",
@@ -149,7 +149,7 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 		"sh-emaildawg.db-wal",
 		"sh-emaildawg.db-shm",
 	}
-	
+
 	var candidates []string
 	for _, relPath := range relativeCandidates {
 		absPath := filepath.Join(cwd, relPath)
@@ -158,7 +158,7 @@ func fnNuke(ce *commands.Event, connector *EmailConnector) {
 			candidates = append(candidates, cleanPath)
 		}
 	}
-	
+
 	removed := 0
 	for _, path := range candidates {
 		if err := os.Remove(path); err == nil {
@@ -218,8 +218,8 @@ func fnLogin(ce *commands.Event, connector *EmailConnector) {
 	ce.Reply(buildEnhancedLoginInstructions(step.Instructions))
 }
 
-func fnLogout(ce *commands.Event) {
-	// Check if user has any active logins
+func fnLogout(ce *commands.Event, connector *EmailConnector) {
+	_ = connector // parameter kept for API consistency
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
 		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
@@ -364,7 +364,11 @@ Need help? Use ` + "`!email help`" + ` for more information.
 
 		response += fmt.Sprintf("• %s **%s** (%s) - %s\n", statusIcon, account.Email, provider, statusText)
 		if hasStatus && status.Host != "" {
-			response += fmt.Sprintf("    %s:%d\n", status.Host, status.Port)
+			response += fmt.Sprintf("    Server: %s:%d\n", status.Host, status.Port)
+		}
+		// Show monitored folders
+		if len(account.MonitoredFolders) > 0 {
+			response += fmt.Sprintf("    📁 Folders: %s\n", strings.Join(account.MonitoredFolders, ", "))
 		}
 		response += fmt.Sprintf("    Added: %s\n\n", account.CreatedAt.Format("Jan 2, 2006"))
 	}
@@ -373,8 +377,8 @@ Need help? Use ` + "`!email help`" + ` for more information.
 	ce.Reply(response)
 }
 
-func fnSync(ce *commands.Event) {
-	// Get user's logins
+func fnSync(ce *commands.Event, connector *EmailConnector) {
+	_ = connector // parameter kept for API consistency
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
 		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
@@ -429,7 +433,7 @@ func fnSync(ce *commands.Event) {
 				// Create individual context for each sync operation
 				syncCtx, syncCancel := context.WithTimeout(ctx, 30*time.Second)
 				done := make(chan error, 1)
-				
+
 				go func() {
 					defer syncCancel() // Ensure context is cancelled when goroutine exits
 					select {
@@ -469,8 +473,8 @@ func fnSync(ce *commands.Event) {
 	ce.Reply(result.String())
 }
 
-func fnReconnect(ce *commands.Event) {
-	// Get user's logins
+func fnReconnect(ce *commands.Event, connector *EmailConnector) {
+	_ = connector // parameter kept for API consistency
 	logins := ce.User.GetUserLogins()
 	if len(logins) == 0 {
 		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
@@ -628,7 +632,7 @@ func processTextLogin(ctx context.Context, ce *commands.Event, email, password s
 	// Validate inputs before setting (additional validation beyond parseLoginArgs)
 	email = strings.TrimSpace(email)
 	password = strings.TrimSpace(password)
-	
+
 	if len(email) > 256 {
 		return fmt.Errorf("email address too long (max 256 characters)")
 	}
@@ -696,9 +700,8 @@ func buildEnhancedLoginInstructions(originalInstructions string) string {
 **Need help?** Use ` + "`!email help`" + ` for more information or ` + "`!email status`" + ` to check connection status.`
 }
 
-func fnPassphrase(ce *commands.Event) {
-	
-	// Parse command arguments
+func fnPassphrase(ce *commands.Event, connector *EmailConnector) {
+	_ = connector // parameter kept for API consistency
 	if len(ce.Args) == 0 {
 		// Show current status and usage
 		passphrasePath, err := getPassphraseFilePath()
@@ -706,16 +709,16 @@ func fnPassphrase(ce *commands.Event) {
 			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
 			return
 		}
-		
+
 		// Check if passphrase file exists
 		exists := false
 		if _, err := os.Stat(passphrasePath); err == nil {
 			exists = true
 		}
-		
+
 		// Check if environment variable is set
 		envSet := strings.TrimSpace(os.Getenv("EMAILDAWG_PASSPHRASE")) != ""
-		
+
 		ce.Reply(`🔐 **Encryption Passphrase Status**
 
 **Environment Variable:** %s
@@ -723,19 +726,19 @@ func fnPassphrase(ce *commands.Event) {
 **File Location:** %s
 
 **Usage:**
-• ` + "`!email passphrase generate`" + ` - Generate new secure passphrase
-• ` + "`!email passphrase show-location`" + ` - Show passphrase file path  
-• ` + "`!email passphrase set <passphrase>`" + ` - Set custom passphrase
+• `+"`!email passphrase generate`"+` - Generate new secure passphrase
+• `+"`!email passphrase show-location`"+` - Show passphrase file path  
+• `+"`!email passphrase set <passphrase>`"+` - Set custom passphrase
 
-**Security Note:** Your email passwords are encrypted using this passphrase. EmailDawg automatically generates one if neither environment variable nor file exists.`, 
+**Security Note:** Your email passwords are encrypted using this passphrase. EmailDawg automatically generates one if neither environment variable nor file exists.`,
 			map[bool]string{true: "✅ Set", false: "❌ Not set"}[envSet],
 			map[bool]string{true: "✅ Exists", false: "❌ Not found"}[exists],
 			passphrasePath)
 		return
 	}
-	
+
 	command := strings.ToLower(ce.Args[0])
-	
+
 	switch command {
 	case "generate":
 		// Generate new passphrase
@@ -744,11 +747,11 @@ func fnPassphrase(ce *commands.Event) {
 			ce.Reply("❌ Failed to generate passphrase: %s", err.Error())
 			return
 		}
-		
+
 		passphrasePath, _ := getPassphraseFilePath()
 		ce.Reply(`✅ **New secure passphrase generated!**
 
-**Passphrase:** ` + "`%s`" + `
+**Passphrase:** `+"`%s`"+`
 **Stored at:** %s
 **Permissions:** 0600 (owner read/write only)
 
@@ -757,22 +760,22 @@ func fnPassphrase(ce *commands.Event) {
 **Next Steps:**
 • Your existing email accounts will continue to work
 • New logins will use this passphrase for encryption
-• You can also set EMAILDAWG_PASSPHRASE environment variable for production use`, 
+• You can also set EMAILDAWG_PASSPHRASE environment variable for production use`,
 			passphrase, passphrasePath)
-			
+
 	case "show-location":
 		passphrasePath, err := getPassphraseFilePath()
 		if err != nil {
 			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
 			return
 		}
-		
+
 		// Check if file exists
 		exists := false
 		if _, err := os.Stat(passphrasePath); err == nil {
 			exists = true
 		}
-		
+
 		ce.Reply(`📍 **Passphrase File Location**
 
 **Path:** %s
@@ -786,40 +789,40 @@ func fnPassphrase(ce *commands.Event) {
 You can also set the EMAILDAWG_PASSPHRASE environment variable instead of using a file.`,
 			passphrasePath,
 			map[bool]string{true: "✅ File exists", false: "❌ File not found"}[exists])
-			
+
 	case "set":
 		if len(ce.Args) < 2 {
 			ce.Reply("❌ Missing passphrase argument.\n\n**Usage:** `!email passphrase set <your-passphrase>`")
 			return
 		}
-		
+
 		// Join remaining args as the passphrase (in case it has spaces)
 		passphrase := strings.Join(ce.Args[1:], " ")
 		if len(passphrase) < 8 {
 			ce.Reply("❌ Passphrase must be at least 8 characters long for security.")
 			return
 		}
-		
+
 		// Get passphrase file path
 		passphrasePath, err := getPassphraseFilePath()
 		if err != nil {
 			ce.Reply("❌ Failed to get passphrase file path: %s", err.Error())
 			return
 		}
-		
+
 		// Create config directory with secure permissions
 		configDir := filepath.Dir(passphrasePath)
 		if err := os.MkdirAll(configDir, 0o700); err != nil {
 			ce.Reply("❌ Failed to create config directory: %s", err.Error())
 			return
 		}
-		
+
 		// Write passphrase file with secure permissions
 		if err := os.WriteFile(passphrasePath, []byte(passphrase), 0o600); err != nil {
 			ce.Reply("❌ Failed to write passphrase file: %s", err.Error())
 			return
 		}
-		
+
 		ce.Reply(`✅ **Custom passphrase set successfully!**
 
 **Stored at:** %s
@@ -831,8 +834,92 @@ You can also set the EMAILDAWG_PASSPHRASE environment variable instead of using 
 • Make sure to remember this passphrase or store it securely
 • You can override this by setting EMAILDAWG_PASSPHRASE environment variable`,
 			passphrasePath)
-			
+
 	default:
 		ce.Reply("❌ Unknown command: %s\n\n**Available commands:**\n• `generate` - Generate new secure passphrase\n• `show-location` - Show passphrase file location\n• `set <passphrase>` - Set custom passphrase", command)
 	}
+}
+
+// fnConfig handles bridge configuration commands
+func fnConfig(ce *commands.Event, connector *EmailConnector) {
+	if len(ce.Args) == 0 {
+		ce.Reply(`⚙️ **Bridge Configuration**
+
+**Available subcommands:**
+• ` + "`!email config folders`" + ` - Change which folders to monitor
+
+**Current status:**
+Use ` + "`!email list`" + ` to see your connected accounts and their settings.`)
+		return
+	}
+
+	subcommand := strings.ToLower(ce.Args[0])
+
+	switch subcommand {
+	case "folders":
+		fnConfigFolders(ce, connector)
+	default:
+		ce.Reply("❌ Unknown config subcommand: `%s`\n\n**Available subcommands:**\n• `folders` - Change which folders to monitor", subcommand)
+	}
+}
+
+// fnConfigFolders handles reconfiguring monitored folders for an account
+// Requires re-authentication as per implementation plan
+func fnConfigFolders(ce *commands.Event, connector *EmailConnector) {
+	_ = connector // parameter kept for API consistency
+	logins := ce.User.GetUserLogins()
+	if len(logins) == 0 {
+		ce.Reply("ℹ️ You're not connected to any email accounts. Use `!email login` to get started.")
+		return
+	}
+
+	// If multiple accounts, need to specify which one
+	if len(logins) > 1 && len(ce.Args) < 2 {
+		var accountList strings.Builder
+		accountList.WriteString("📧 You have multiple email accounts. Please specify which account to reconfigure:\n\n")
+		for _, login := range logins {
+			if client, ok := login.Client.(*EmailClient); ok {
+				accountList.WriteString(fmt.Sprintf("• `!email config folders %s`\n", client.Email))
+			}
+		}
+		ce.Reply(accountList.String())
+		return
+	}
+
+	// Find the target account
+	var targetEmail string
+	if len(ce.Args) >= 2 {
+		targetEmail = ce.Args[1]
+	} else {
+		// Single account - use it
+		if client, ok := logins[0].Client.(*EmailClient); ok {
+			targetEmail = client.Email
+		}
+	}
+
+	// Verify the account exists
+	var targetLogin *bridgev2.UserLogin
+	for _, login := range logins {
+		if client, ok := login.Client.(*EmailClient); ok && client.Email == targetEmail {
+			targetLogin = login
+			break
+		}
+	}
+
+	if targetLogin == nil {
+		ce.Reply("❌ Email account **%s** not found in your connected accounts.", targetEmail)
+		return
+	}
+
+	ce.Reply(`🔐 **Folder Reconfiguration**
+
+To change the monitored folders for **%s**, you'll need to re-authenticate.
+
+**Why?** Re-authentication ensures your credentials are still valid and allows us to fetch the current folder list.
+
+**To proceed:**
+1. Use `+"`!email logout %s`"+` to disconnect
+2. Use `+"`!email login`"+` to reconnect and choose new folders
+
+💡 **Tip:** Your existing Matrix rooms will remain - only the folders being monitored will change.`, targetEmail, targetEmail)
 }

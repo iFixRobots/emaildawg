@@ -20,6 +20,14 @@ type EmailLoginProcess struct {
 	email     string
 	username  string
 	password  string
+
+	// Multi-step flow state
+	currentStep      string            // "credentials", "folder_selection", "confirmation"
+	availableFolders []imap.FolderInfo // Folders enumerated after credential validation
+	selectedFolders  []imap.FolderInfo // User's folder selection
+	selectedNames    []string          // Raw IMAP folder names for storage
+	providerName     string            // Detected provider name for display
+	testClient       *imap.Client      // Validated IMAP client (reused for folder listing)
 }
 
 var (
@@ -91,6 +99,20 @@ func (elp *EmailLoginProcess) Cancel() {
 
 // SubmitUserInput handles a login step submission
 func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	// Route to appropriate handler based on current step
+	switch elp.currentStep {
+	case "folder_selection":
+		return elp.handleFolderSelection(ctx, input)
+	case "confirmation":
+		return elp.handleConfirmation(ctx, input)
+	default:
+		// Default: credentials step
+		return elp.handleCredentials(ctx, input)
+	}
+}
+
+// handleCredentials validates credentials and proceeds to folder selection
+func (elp *EmailLoginProcess) handleCredentials(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
 	// Extract credentials from user input data
 	for key, value := range input {
 		switch key {
@@ -116,6 +138,11 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 
 	// Detect email provider and give specific guidance
 	providerInfo := elp.detectEmailProvider()
+	if providerInfo != nil {
+		elp.providerName = providerInfo.Name
+	} else {
+		elp.providerName = "Email"
+	}
 
 	// Show provider detection results to user
 	if providerInfo != nil && providerInfo.Name != "Custom Provider" {
@@ -137,13 +164,188 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 		}
 	}
 
-	// Test IMAP connection with helpful error messages
-	if err := elp.testIMAPConnection(ctx); err != nil {
+	// Test IMAP connection and keep client for folder listing
+	client, err := elp.testIMAPConnectionAndKeep(ctx)
+	if err != nil {
 		// Provide provider-specific troubleshooting
 		errorMsg := elp.buildConnectionErrorMessage(err, providerInfo)
 		return nil, fmt.Errorf("%s", errorMsg)
 	}
+	elp.testClient = client
 
+	// Enumerate available folders
+	folders, err := client.ListFolders()
+	if err != nil {
+		client.Disconnect()
+		elp.connector.Bridge.Log.Warn().Err(err).Msg("Failed to list folders, falling back to INBOX only")
+		// Fall back to INBOX-only if folder listing fails
+		elp.selectedNames = []string{"INBOX"}
+		elp.selectedFolders = []imap.FolderInfo{{
+			Name:    "INBOX",
+			Display: "INBOX",
+			Icon:    "📥",
+			Type:    imap.FolderTypeStandard,
+		}}
+		// Skip folder selection, go directly to save
+		return elp.completeLogin(ctx)
+	}
+
+	elp.availableFolders = folders
+	client.Disconnect() // Close connection, will reconnect when starting monitoring
+
+	// If no folders found, fall back to INBOX
+	if len(folders) == 0 {
+		elp.selectedNames = []string{"INBOX"}
+		elp.selectedFolders = []imap.FolderInfo{{
+			Name:    "INBOX",
+			Display: "INBOX",
+			Icon:    "📥",
+			Type:    imap.FolderTypeStandard,
+		}}
+		return elp.completeLogin(ctx)
+	}
+
+	// Move to folder selection step
+	elp.currentStep = "folder_selection"
+
+	return &bridgev2.LoginStep{
+		Type:         bridgev2.LoginStepTypeUserInput,
+		StepID:       "folder_selection",
+		Instructions: BuildFolderSelectionPrompt(folders, elp.providerName),
+		UserInputParams: &bridgev2.LoginUserInputParams{
+			Fields: []bridgev2.LoginInputDataField{
+				{
+					Type:        bridgev2.LoginInputFieldTypeUsername,
+					ID:          "folder_selection",
+					Name:        "Folder Selection",
+					Description: "Enter folder number(s), 'default' for INBOX, or 'cancel'",
+				},
+			},
+		},
+	}, nil
+}
+
+// handleFolderSelection validates folder selection and proceeds to confirmation
+func (elp *EmailLoginProcess) handleFolderSelection(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	_ = ctx // ctx reserved for future use
+	selectionInput := ""
+	for key, value := range input {
+		if key == "folder_selection" {
+			selectionInput = value
+			break
+		}
+	}
+
+	result := ValidateFolderSelection(selectionInput, elp.availableFolders)
+
+	if result.IsCancel {
+		return nil, fmt.Errorf("login cancelled by user")
+	}
+
+	if !result.Valid {
+		// Show error and re-prompt
+		return &bridgev2.LoginStep{
+			Type:         bridgev2.LoginStepTypeUserInput,
+			StepID:       "folder_selection",
+			Instructions: result.ErrorMessage + "\n\n" + BuildFolderSelectionPrompt(elp.availableFolders, elp.providerName),
+			UserInputParams: &bridgev2.LoginUserInputParams{
+				Fields: []bridgev2.LoginInputDataField{
+					{
+						Type:        bridgev2.LoginInputFieldTypeUsername,
+						ID:          "folder_selection",
+						Name:        "Folder Selection",
+						Description: "Enter folder number(s), 'default' for INBOX, or 'cancel'",
+					},
+				},
+			},
+		}, nil
+	}
+
+	// Store selection
+	elp.selectedNames = result.SelectedNames
+	elp.selectedFolders = result.SelectedInfos
+
+	// Move to confirmation step
+	elp.currentStep = "confirmation"
+
+	return &bridgev2.LoginStep{
+		Type:         bridgev2.LoginStepTypeUserInput,
+		StepID:       "confirmation",
+		Instructions: BuildConfirmationPrompt(elp.selectedFolders),
+		UserInputParams: &bridgev2.LoginUserInputParams{
+			Fields: []bridgev2.LoginInputDataField{
+				{
+					Type:        bridgev2.LoginInputFieldTypeUsername,
+					ID:          "confirmation",
+					Name:        "Confirmation",
+					Description: "Type 'yes' to confirm, 'no' to go back, or 'cancel'",
+				},
+			},
+		},
+	}, nil
+}
+
+// handleConfirmation validates confirmation and completes login
+func (elp *EmailLoginProcess) handleConfirmation(ctx context.Context, input map[string]string) (*bridgev2.LoginStep, error) {
+	confirmInput := ""
+	for key, value := range input {
+		if key == "confirmation" {
+			confirmInput = value
+			break
+		}
+	}
+
+	confirmed, goBack, cancel, errorMsg := ValidateConfirmation(confirmInput)
+
+	if cancel {
+		return nil, fmt.Errorf("login cancelled by user")
+	}
+
+	if goBack {
+		// Go back to folder selection
+		elp.currentStep = "folder_selection"
+		return &bridgev2.LoginStep{
+			Type:         bridgev2.LoginStepTypeUserInput,
+			StepID:       "folder_selection",
+			Instructions: BuildFolderSelectionPrompt(elp.availableFolders, elp.providerName),
+			UserInputParams: &bridgev2.LoginUserInputParams{
+				Fields: []bridgev2.LoginInputDataField{
+					{
+						Type:        bridgev2.LoginInputFieldTypeUsername,
+						ID:          "folder_selection",
+						Name:        "Folder Selection",
+						Description: "Enter folder number(s), 'default' for INBOX, or 'cancel'",
+					},
+				},
+			},
+		}, nil
+	}
+
+	if !confirmed {
+		// Show error and re-prompt
+		return &bridgev2.LoginStep{
+			Type:         bridgev2.LoginStepTypeUserInput,
+			StepID:       "confirmation",
+			Instructions: "❌ " + errorMsg + "\n\n" + BuildConfirmationPrompt(elp.selectedFolders),
+			UserInputParams: &bridgev2.LoginUserInputParams{
+				Fields: []bridgev2.LoginInputDataField{
+					{
+						Type:        bridgev2.LoginInputFieldTypeUsername,
+						ID:          "confirmation",
+						Name:        "Confirmation",
+						Description: "Type 'yes' to confirm, 'no' to go back, or 'cancel'",
+					},
+				},
+			},
+		}, nil
+	}
+
+	// User confirmed, complete the login
+	return elp.completeLogin(ctx)
+}
+
+// completeLogin saves the account and completes the login process
+func (elp *EmailLoginProcess) completeLogin(ctx context.Context) (*bridgev2.LoginStep, error) {
 	// Save credentials to database FIRST (before creating user login)
 	// This ensures LoadUserLogin can find the account when it's called
 	if err := elp.saveAccount(ctx); err != nil {
@@ -167,13 +369,24 @@ func (elp *EmailLoginProcess) SubmitUserInput(ctx context.Context, input map[str
 		return nil, fmt.Errorf("failed to create user login: %w", err)
 	}
 
-	// The IMAP monitoring will be started when the client connects
-	// via the LoadUserLogin -> Connect flow
+	// Build success message with folder info
+	var folderList strings.Builder
+	for _, f := range elp.selectedFolders {
+		folderList.WriteString(fmt.Sprintf("\n  • %s %s %s", f.Icon, f.Display, f.TypeBracket()))
+	}
+
+	successMsg := fmt.Sprintf(`✅ **Account configured successfully!**
+
+📧 **Email:** %s
+📁 **Monitoring:**%s
+
+Emails from the selected folder(s) will now appear in Beeper.
+To change folders later, use `+"`!email config folders`"+``, elp.email, folderList.String())
 
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
 		StepID:       "complete",
-		Instructions: fmt.Sprintf("Successfully logged in as %s", elp.email),
+		Instructions: successMsg,
 		CompleteParams: &bridgev2.LoginCompleteParams{
 			UserLoginID: userLogin.ID,
 			UserLogin:   userLogin,
@@ -222,38 +435,37 @@ func (eul *EmailUserLogin) GetRemoteName() string {
 }
 
 // testIMAPConnection tests the IMAP connection with provided credentials
-func (elp *EmailLoginProcess) testIMAPConnection(ctx context.Context) error {
+// testIMAPConnectionAndKeep tests the IMAP connection and returns the connected client
+// for subsequent operations like folder listing
+func (elp *EmailLoginProcess) testIMAPConnectionAndKeep(ctx context.Context) (*imap.Client, error) {
 	// Keep ctx parameter used to satisfy linters even if not currently leveraged here.
 	_ = ctx
 	// Create a temporary logger for testing (NO PASSWORDS LOGGED)
 	logger := elp.connector.Bridge.Log.With().
 		Str("component", "login_test").
 		Str("email", elp.email)
-	
+
 	// Safely extract domain for logging
 	if parts := strings.Split(elp.email, "@"); len(parts) == 2 {
 		logger = logger.Str("host_detected", parts[1])
 	}
-	
+
 	finalLogger := logger.Logger()
 
-		// Create test IMAP client without UserLogin (just for testing connection)
+	// Create test IMAP client without UserLogin (just for testing connection)
 	client, err := imap.NewClient(elp.email, elp.username, elp.password, nil, &finalLogger, elp.connector.Config.Logging.Sanitized, elp.connector.Config.Logging.PseudonymSecret, elp.connector.Config.Network.IMAP.StartupBackfillSeconds, elp.connector.Config.Network.IMAP.StartupBackfillMax, elp.connector.Config.Network.IMAP.InitialIdleTimeoutSeconds, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create IMAP client: %w", err)
+		return nil, fmt.Errorf("failed to create IMAP client: %w", err)
 	}
 
 	// Test connection
 	err = client.Connect()
 	if err != nil {
-		return fmt.Errorf("connection failed: %w", err)
+		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 
-	// Clean up test connection
-	client.Disconnect()
-
 	finalLogger.Info().Msg("IMAP connection test successful")
-	return nil
+	return client, nil
 }
 
 // saveAccount saves the email account credentials to database
@@ -287,15 +499,16 @@ func (elp *EmailLoginProcess) saveAccount(ctx context.Context) error {
 	}
 
 	account := &EmailAccount{
-		UserMXID:     elp.user.MXID.String(),
-		Email:        elp.email,
-		Username:     elp.username,
-		Password:     elp.password,
-		Host:         host,
-		Port:         port,
-		TLS:          tls,
-		CreatedAt:    time.Now(),
-		LastSyncTime: time.Now(),
+		UserMXID:         elp.user.MXID.String(),
+		Email:            elp.email,
+		Username:         elp.username,
+		Password:         elp.password,
+		Host:             host,
+		Port:             port,
+		TLS:              tls,
+		CreatedAt:        time.Now(),
+		LastSyncTime:     time.Now(),
+		MonitoredFolders: elp.selectedNames,
 	}
 
 	logger.Debug().Str("host", host).Int("port", port).Bool("tls", tls).Msg("Attempting to save account to database")
@@ -428,7 +641,7 @@ func (elp *EmailLoginProcess) buildConnectionErrorMessage(err error, provider *P
 			domain = parts[1]
 			fallbackHost = fmt.Sprintf("imap.%s", domain)
 		}
-		
+
 		return fmt.Sprintf(`❌ **Connection Failed - Auto-Detection Used**
 
 🔍 **We attempted to connect using:** %s:993

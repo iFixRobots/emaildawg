@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,15 +24,39 @@ import (
 
 // EmailAccount represents a stored email account with credentials
 type EmailAccount struct {
-	UserMXID     string    `json:"user_mxid"`
-	Email        string    `json:"email"`
-	Username     string    `json:"username"`
-	Password     string    `json:"password"`
-	Host         string    `json:"host"`
-	Port         int       `json:"port"`
-	TLS          bool      `json:"tls"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastSyncTime time.Time `json:"last_sync_time"`
+	UserMXID         string    `json:"user_mxid"`
+	Email            string    `json:"email"`
+	Username         string    `json:"username"`
+	Password         string    `json:"password"`
+	Host             string    `json:"host"`
+	Port             int       `json:"port"`
+	TLS              bool      `json:"tls"`
+	CreatedAt        time.Time `json:"created_at"`
+	LastSyncTime     time.Time `json:"last_sync_time"`
+	MonitoredFolders []string  `json:"monitored_folders"` // List of folders to monitor (e.g., ["INBOX", "BridgeToBeeper"])
+}
+
+// GetMonitoredFoldersJSON serializes MonitoredFolders to JSON for database storage
+func (a *EmailAccount) GetMonitoredFoldersJSON() string {
+	if len(a.MonitoredFolders) == 0 {
+		return `["INBOX"]` // Default to INBOX if not set
+	}
+	data, err := json.Marshal(a.MonitoredFolders)
+	if err != nil {
+		return `["INBOX"]`
+	}
+	return string(data)
+}
+
+// SetMonitoredFoldersFromJSON deserializes MonitoredFolders from JSON database storage
+func (a *EmailAccount) SetMonitoredFoldersFromJSON(jsonStr string) {
+	if jsonStr == "" {
+		a.MonitoredFolders = []string{"INBOX"}
+		return
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &a.MonitoredFolders); err != nil {
+		a.MonitoredFolders = []string{"INBOX"}
+	}
 }
 
 // EmailAccountQuery handles database operations for email accounts
@@ -45,7 +70,7 @@ const encPrefix = "v2:"
 
 const (
 	pbkdf2Iterations = 100000 // PBKDF2 iterations for key derivation
-	saltSize        = 32      // Salt size in bytes
+	saltSize         = 32     // Salt size in bytes
 )
 
 var (
@@ -58,12 +83,12 @@ func getDBKey() ([]byte, error) {
 	keyOnce.Do(func() {
 		// Step 1: Check environment variable (highest priority for production)
 		passphrase := strings.TrimSpace(os.Getenv("EMAILDAWG_PASSPHRASE"))
-		
+
 		// Step 2: Check for passphrase file if env var not set
 		if passphrase == "" {
 			passphrase, _ = readPassphraseFile()
 		}
-		
+
 		// Step 3: Auto-generate secure passphrase if neither exists
 		if passphrase == "" {
 			passphrase, keyErr = generateAndStorePassphrase()
@@ -71,13 +96,13 @@ func getDBKey() ([]byte, error) {
 				return
 			}
 		}
-		
+
 		salt, err := getSalt()
 		if err != nil {
 			keyErr = fmt.Errorf("failed to get salt: %w", err)
 			return
 		}
-		
+
 		// Derive key using PBKDF2
 		dbKey = pbkdf2.Key([]byte(passphrase), salt, pbkdf2Iterations, 32, sha256.New)
 	})
@@ -96,13 +121,13 @@ func getUserConfigDir() (string, error) {
 	if configDir := os.Getenv("XDG_CONFIG_HOME"); configDir != "" {
 		return filepath.Join(configDir, "emaildawg"), nil
 	}
-	
+
 	// Get user home directory
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get user home directory: %w", err)
 	}
-	
+
 	// Platform-specific config paths
 	switch runtime.GOOS {
 	case "windows":
@@ -129,12 +154,12 @@ func readPassphraseFile() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	data, err := os.ReadFile(passphrasePath)
 	if err != nil {
 		return "", err
 	}
-	
+
 	return strings.TrimSpace(string(data)), nil
 }
 
@@ -145,31 +170,31 @@ func generateAndStorePassphrase() (string, error) {
 	if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
 		return "", fmt.Errorf("failed to generate random passphrase: %w", err)
 	}
-	
+
 	// Encode as base64 for storage
 	passphrase := base64.StdEncoding.EncodeToString(randomBytes)
-	
+
 	// Get passphrase file path
 	passphrasePath, err := getPassphraseFilePath()
 	if err != nil {
 		return "", err
 	}
-	
+
 	// Create config directory with secure permissions
 	configDir := filepath.Dir(passphrasePath)
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", fmt.Errorf("failed to create config directory: %w", err)
 	}
-	
+
 	// Write passphrase file with secure permissions
 	if err := os.WriteFile(passphrasePath, []byte(passphrase), 0o600); err != nil {
 		return "", fmt.Errorf("failed to write passphrase file: %w", err)
 	}
-	
+
 	// Log to stderr to avoid potential information disclosure in stdout logs
 	fmt.Fprintf(os.Stderr, "Auto-generated secure passphrase stored (check config directory)\n")
 	fmt.Fprintf(os.Stderr, "EmailDawg is ready! Your credentials will be securely encrypted.\n")
-	
+
 	return passphrase, nil
 }
 
@@ -182,7 +207,7 @@ func getSalt() ([]byte, error) {
 	}
 	dataDir := filepath.Join(cwd, "data")
 	saltPath := filepath.Join(dataDir, "emaildawg.salt")
-	
+
 	// Try to read existing salt
 	if data, err := os.ReadFile(saltPath); err == nil {
 		salt, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
@@ -190,24 +215,24 @@ func getSalt() ([]byte, error) {
 			return salt, nil
 		}
 	}
-	
+
 	// Generate new salt
 	salt := make([]byte, saltSize)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, fmt.Errorf("failed to generate salt: %w", err)
 	}
-	
+
 	// Create directory with secure permissions
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-	
+
 	// Save salt
 	saltB64 := base64.StdEncoding.EncodeToString(salt)
 	if err := os.WriteFile(saltPath, []byte(saltB64), 0o600); err != nil {
 		return nil, fmt.Errorf("failed to save salt: %w", err)
 	}
-	
+
 	return salt, nil
 }
 
@@ -238,12 +263,12 @@ func decryptString(stored string) (string, error) {
 	if strings.HasPrefix(stored, "v1:") {
 		return "", errors.New("cannot decrypt old v1 encrypted data - please delete your database and reconfigure your email accounts with the new secure system")
 	}
-	
+
 	// Only accept v2 encrypted data
 	if !strings.HasPrefix(stored, encPrefix) {
 		return "", errors.New("value is not encrypted with expected v2: prefix")
 	}
-	
+
 	key, err := getDBKey()
 	if err != nil {
 		return "", err
@@ -285,13 +310,20 @@ func (eaq *EmailAccountQuery) CreateTable(ctx context.Context) error {
 			tls BOOLEAN NOT NULL,
 			created_at TIMESTAMP NOT NULL,
 			last_sync_time TIMESTAMP,
+			monitored_folders TEXT DEFAULT '["INBOX"]',
 			PRIMARY KEY (user_mxid, email)
 		)
 	`)
 	if err != nil {
 		return err
 	}
-	
+
+	// Add monitored_folders column to existing tables (migration)
+	// SQLite will ignore this if column already exists (we check first)
+	_, _ = eaq.DB.Exec(ctx, `
+		ALTER TABLE email_accounts ADD COLUMN monitored_folders TEXT DEFAULT '["INBOX"]'
+	`)
+
 	// Create performance indexes
 	_, err = eaq.DB.Exec(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_email_accounts_user_created 
@@ -300,19 +332,19 @@ func (eaq *EmailAccountQuery) CreateTable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	
+
 	_, err = eaq.DB.Exec(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_email_accounts_last_sync 
 		ON email_accounts(user_mxid, last_sync_time)
 	`)
-	
+
 	return err
 }
 
 func (eaq *EmailAccountQuery) GetAccount(ctx context.Context, userMXID, email string) (*EmailAccount, error) {
 	account := &EmailAccount{}
 	rows, err := eaq.DB.Query(ctx, `
-		SELECT user_mxid, email, username, password, host, port, tls, created_at, last_sync_time
+		SELECT user_mxid, email, username, password, host, port, tls, created_at, last_sync_time, COALESCE(monitored_folders, '["INBOX"]')
 		FROM email_accounts
 		WHERE user_mxid = ? AND email = ?
 	`, userMXID, email)
@@ -320,7 +352,7 @@ func (eaq *EmailAccountQuery) GetAccount(ctx context.Context, userMXID, email st
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	if !rows.Next() {
 		// Check if Next() failed due to an error
 		if err := rows.Err(); err != nil {
@@ -328,14 +360,17 @@ func (eaq *EmailAccountQuery) GetAccount(ctx context.Context, userMXID, email st
 		}
 		return nil, nil // No account found
 	}
-	
+
+	var monitoredFoldersJSON string
 	err = rows.Scan(
 		&account.UserMXID, &account.Email, &account.Username, &account.Password,
 		&account.Host, &account.Port, &account.TLS, &account.CreatedAt, &account.LastSyncTime,
+		&monitoredFoldersJSON,
 	)
 	if err != nil {
 		return nil, err
 	}
+	account.SetMonitoredFoldersFromJSON(monitoredFoldersJSON)
 	// Decrypt password (fresh deployments always store encrypted)
 	plain, derr := decryptString(account.Password)
 	if derr != nil {
@@ -348,7 +383,7 @@ func (eaq *EmailAccountQuery) GetAccount(ctx context.Context, userMXID, email st
 
 func (eaq *EmailAccountQuery) GetUserAccounts(ctx context.Context, userMXID string) ([]*EmailAccount, error) {
 	rows, err := eaq.DB.Query(ctx, `
-		SELECT user_mxid, email, username, password, host, port, tls, created_at, last_sync_time
+		SELECT user_mxid, email, username, password, host, port, tls, created_at, last_sync_time, COALESCE(monitored_folders, '["INBOX"]')
 		FROM email_accounts
 		WHERE user_mxid = ?
 		ORDER BY created_at ASC
@@ -357,17 +392,20 @@ func (eaq *EmailAccountQuery) GetUserAccounts(ctx context.Context, userMXID stri
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var accounts []*EmailAccount
 	for rows.Next() {
 		account := &EmailAccount{}
+		var monitoredFoldersJSON string
 		err = rows.Scan(
 			&account.UserMXID, &account.Email, &account.Username, &account.Password,
 			&account.Host, &account.Port, &account.TLS, &account.CreatedAt, &account.LastSyncTime,
+			&monitoredFoldersJSON,
 		)
 		if err != nil {
 			return nil, err
 		}
+		account.SetMonitoredFoldersFromJSON(monitoredFoldersJSON)
 		plain, derr := decryptString(account.Password)
 		if derr != nil {
 			// Don't expose decryption details to prevent information disclosure
@@ -382,7 +420,7 @@ func (eaq *EmailAccountQuery) GetUserAccounts(ctx context.Context, userMXID stri
 // GetUserAccountsBasic returns user accounts without decrypting passwords (for display/status)
 func (eaq *EmailAccountQuery) GetUserAccountsBasic(ctx context.Context, userMXID string) ([]*EmailAccount, error) {
 	rows, err := eaq.DB.Query(ctx, `
-		SELECT user_mxid, email, username, host, port, tls, created_at, last_sync_time
+		SELECT user_mxid, email, username, host, port, tls, created_at, last_sync_time, COALESCE(monitored_folders, '["INBOX"]')
 		FROM email_accounts
 		WHERE user_mxid = ?
 		ORDER BY created_at ASC
@@ -391,18 +429,21 @@ func (eaq *EmailAccountQuery) GetUserAccountsBasic(ctx context.Context, userMXID
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	// Pre-allocate slice with reasonable capacity to reduce reallocations
 	accounts := make([]*EmailAccount, 0, 4)
 	for rows.Next() {
 		account := &EmailAccount{}
+		var monitoredFoldersJSON string
 		err = rows.Scan(
 			&account.UserMXID, &account.Email, &account.Username,
 			&account.Host, &account.Port, &account.TLS, &account.CreatedAt, &account.LastSyncTime,
+			&monitoredFoldersJSON,
 		)
 		if err != nil {
 			return nil, err
 		}
+		account.SetMonitoredFoldersFromJSON(monitoredFoldersJSON)
 		// Password is left empty for basic account info
 		accounts = append(accounts, account)
 	}
@@ -416,10 +457,11 @@ func (eaq *EmailAccountQuery) UpsertAccount(ctx context.Context, account *EmailA
 	}
 	_, err = eaq.DB.Exec(ctx, `
 		INSERT OR REPLACE INTO email_accounts 
-		(user_mxid, email, username, password, host, port, tls, created_at, last_sync_time)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(user_mxid, email, username, password, host, port, tls, created_at, last_sync_time, monitored_folders)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, account.UserMXID, account.Email, account.Username, enc,
-		account.Host, account.Port, account.TLS, account.CreatedAt, account.LastSyncTime)
+		account.Host, account.Port, account.TLS, account.CreatedAt, account.LastSyncTime,
+		account.GetMonitoredFoldersJSON())
 	return err
 }
 

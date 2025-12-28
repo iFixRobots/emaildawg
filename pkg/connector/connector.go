@@ -231,6 +231,14 @@ func (ec *EmailConnector) createCommands() []commands.CommandHandler {
 				Description: "Show database encryption passphrase",
 			},
 		},
+		&commands.FullHandler{
+			Func: func(ce *commands.Event) { fnConfig(ce, ec) },
+			Name: "config",
+			Help: commands.HelpMeta{
+				Section:     HelpSectionAdmin,
+				Description: "Configure email bridge settings (e.g., config folders)",
+			},
+		},
 	}
 }
 

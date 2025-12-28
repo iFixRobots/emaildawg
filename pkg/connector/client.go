@@ -22,13 +22,13 @@ import (
 type ClientConfig struct {
 	// Registration wait time before checking if client connected
 	RegistrationWaitTime time.Duration
-	
+
 	// Reconnection sleep time to allow server-side cleanup
 	ReconnectionSleepTime time.Duration
-	
+
 	// Periodic sync interval
 	PeriodicSyncInterval time.Duration
-	
+
 	// Minimum time between sync operations (throttling)
 	SyncThrottleTime time.Duration
 }
@@ -52,6 +52,9 @@ type EmailClient struct {
 	Email    string
 	Username string
 	Password string
+
+	// Folders to monitor (from user selection during login)
+	MonitoredFolders []string
 
 	// IMAP client
 	IMAPClient *imap.Client
@@ -87,7 +90,7 @@ var (
 // extractEmailCredentials extracts email and username from login metadata or login ID
 func (ec *EmailConnector) extractEmailCredentials(login *bridgev2.UserLogin) (string, string, error) {
 	var email, username string
-	
+
 	// Extract login metadata with proper error handling
 	if login.Metadata != nil {
 		if loginMetadata, ok := login.Metadata.(*EmailLoginMetadata); ok && loginMetadata.Email != "" {
@@ -187,7 +190,7 @@ func (ec *EmailConnector) startClientConnections(emailClient *EmailClient, login
 func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
 	// Create client lifecycle context that survives beyond this function
 	clientCtx, clientCancel := context.WithCancel(context.Background())
-	
+
 	// Create email client for this login
 	emailClient := &EmailClient{
 		Main:      ec,
@@ -196,7 +199,7 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		cancel:    clientCancel,
 		config:    DefaultClientConfig(),
 	}
-	
+
 	// Initialize state coordinator
 	emailClient.stateCoordinator = coordinator.NewStateCoordinator(login, &ec.Bridge.Log)
 	login.Client = emailClient
@@ -215,6 +218,18 @@ func (ec *EmailConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 		return err
 	}
 	emailClient.Password = account.Password
+	emailClient.MonitoredFolders = account.MonitoredFolders
+
+	// Log configured folders
+	if len(account.MonitoredFolders) > 0 {
+		ec.Bridge.Log.Info().
+			Strs("folders", account.MonitoredFolders).
+			Str("email", emailClient.Email).
+			Msg("Loaded monitored folders configuration")
+	} else {
+		ec.Bridge.Log.Debug().Str("email", emailClient.Email).Msg("No monitored folders configured, will use INBOX")
+		emailClient.MonitoredFolders = []string{"INBOX"}
+	}
 
 	// Create IMAP client
 	if err := ec.createIMAPClient(emailClient, login); err != nil {
@@ -366,11 +381,11 @@ func (ec *EmailClient) Stop(ctx context.Context) {
 func (ec *EmailClient) startIDLEWithRetry() error {
 	// Get IMAP timeout configuration for timeout protection
 	timeoutConfig := reliability.IMAPTimeouts()
-	
+
 	// Add timeout for the entire IDLE startup sequence
 	timeoutCtx, cancel := context.WithTimeout(ec.ctx, timeoutConfig.Command)
 	defer cancel()
-	
+
 	return reliability.RetryWithBackoff(timeoutCtx, reliability.IDLEStartupRetryConfig(), func() error {
 		// Test connection health first
 		if err := ec.IMAPClient.TestConnection(); err != nil {
@@ -378,16 +393,16 @@ func (ec *EmailClient) startIDLEWithRetry() error {
 			// Let the retry system handle connection recovery - this will trigger reconnectIMAPClient
 			return err
 		}
-		
+
 		// Attempt to start IDLE
 		if err := ec.IMAPClient.StartIDLE(); err != nil {
 			// Let the retry system categorize and decide whether to retry
 			// This includes IDLE conflicts, server errors, and network issues
 			ec.UserLogin.Log.Debug().Err(err).Msg("IDLE startup failed, letting retry system handle recovery")
-			
+
 			// For IDLE conflicts, force reconnection before next retry
-			if strings.Contains(strings.ToLower(err.Error()), "idle already") || 
-			   strings.Contains(strings.ToLower(err.Error()), "already running") {
+			if strings.Contains(strings.ToLower(err.Error()), "idle already") ||
+				strings.Contains(strings.ToLower(err.Error()), "already running") {
 				if reconErr := ec.reconnectIMAPClient(); reconErr != nil {
 					ec.UserLogin.Log.Warn().Err(reconErr).Msg("Failed to reconnect during IDLE conflict recovery")
 					// Return original error, not reconnection error, for retry system categorization
@@ -395,10 +410,10 @@ func (ec *EmailClient) startIDLEWithRetry() error {
 					ec.UserLogin.Log.Debug().Msg("Reconnected successfully to clear IDLE conflict")
 				}
 			}
-			
+
 			return err
 		}
-		
+
 		ec.UserLogin.Log.Info().Msg("IDLE started successfully")
 		return nil
 	})
@@ -469,7 +484,7 @@ func (ec *EmailClient) performPeriodicSync(ctx context.Context) {
 	timeoutConfig := reliability.IMAPTimeouts()
 	timeoutCtx, cancel := context.WithTimeout(ctx, timeoutConfig.Command)
 	defer cancel()
-	
+
 	var err error
 	func() {
 		// Capture IMAP client reference safely to prevent nil pointer panic
