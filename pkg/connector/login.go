@@ -295,11 +295,7 @@ func (elp *EmailLoginProcess) handleConfirmation(ctx context.Context, input map[
 		}
 	}
 
-	confirmed, goBack, cancel, errorMsg := ValidateConfirmation(confirmInput)
-
-	if cancel {
-		return nil, fmt.Errorf("login cancelled by user")
-	}
+	confirmed, goBack, errorMsg := ValidateConfirmation(confirmInput)
 
 	if goBack {
 		// Go back to folder selection
@@ -314,7 +310,7 @@ func (elp *EmailLoginProcess) handleConfirmation(ctx context.Context, input map[
 						Type:        bridgev2.LoginInputFieldTypeUsername,
 						ID:          "folder_selection",
 						Name:        "Folder Selection",
-						Description: "Enter folder number(s), 'default' for INBOX, or 'cancel'",
+						Description: "Enter folder number(s) or 'default' for INBOX",
 					},
 				},
 			},
@@ -326,14 +322,14 @@ func (elp *EmailLoginProcess) handleConfirmation(ctx context.Context, input map[
 		return &bridgev2.LoginStep{
 			Type:         bridgev2.LoginStepTypeUserInput,
 			StepID:       "confirmation",
-			Instructions: "❌ " + errorMsg + "\n\n" + BuildConfirmationPrompt(elp.selectedFolders),
+			Instructions: errorMsg + "\n\n" + BuildConfirmationPrompt(elp.selectedFolders),
 			UserInputParams: &bridgev2.LoginUserInputParams{
 				Fields: []bridgev2.LoginInputDataField{
 					{
 						Type:        bridgev2.LoginInputFieldTypeUsername,
 						ID:          "confirmation",
 						Name:        "Confirmation",
-						Description: "Type 'yes' to confirm, 'no' to go back, or 'cancel'",
+						Description: "Type 'yes' or 'no'",
 					},
 				},
 			},

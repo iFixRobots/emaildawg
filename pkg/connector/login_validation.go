@@ -123,19 +123,18 @@ func ValidateFolderSelection(input string, availableFolders []imap.FolderInfo) F
 	}
 }
 
-// ValidateConfirmation validates yes/no/cancel confirmation input
-func ValidateConfirmation(input string) (confirmed bool, goBack bool, cancel bool, errorMsg string) {
+// ValidateConfirmation validates yes/no confirmation input
+// Returns: confirmed, goBack, errorMsg
+func ValidateConfirmation(input string) (confirmed bool, goBack bool, errorMsg string) {
 	input = strings.TrimSpace(strings.ToLower(input))
 
 	switch input {
 	case "yes", "y":
-		return true, false, false, ""
+		return true, false, ""
 	case "no", "n":
-		return false, true, false, ""
-	case "cancel":
-		return false, false, true, ""
+		return false, true, ""
 	default:
-		return false, false, false, "Please type `yes` to confirm, `no` to go back, or `cancel` to abort."
+		return false, false, "❌ Invalid input. Please type `yes` or `no`."
 	}
 }
 
@@ -182,7 +181,7 @@ func BuildConfirmationPrompt(folders []imap.FolderInfo) string {
 	}
 
 	sb.WriteString("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	sb.WriteString("Type `yes` to confirm, `no` to go back, or `cancel` to abort.")
+	sb.WriteString("Type `yes` to confirm or `no` to go back.")
 
 	return sb.String()
 }
